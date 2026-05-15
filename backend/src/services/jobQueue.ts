@@ -103,6 +103,55 @@ export function startImportJob(opts: {
             : `\`${opts.table.replaceAll("`", "``")}\``;
       let inserted = 0;
       let failed = 0;
+      const BATCH = 200;
+      let colOrder: string[] | null = null;
+      let batch: Record<string, unknown>[] = [];
+
+      const qCol = (c: string) =>
+        dialect === "mysql"
+          ? `\`${c.replaceAll("`", "``")}\``
+          : `"${c.replaceAll('"', '""')}"`;
+
+      const flushBatch = async () => {
+        if (!batch.length || !colOrder?.length) {
+          batch = [];
+          return;
+        }
+        const qCols = colOrder.map(qCol).join(", ");
+        const rowPh =
+          dialect === "pg" || dialect === "snowflake"
+            ? colOrder.map((_, i) => `$${i + 1}`).join(", ")
+            : colOrder.map(() => "?").join(", ");
+        const valueGroups = batch.map((_, ri) => {
+          if (dialect === "pg" || dialect === "snowflake") {
+            return `(${colOrder!.map((_, ci) => `$${ri * colOrder!.length + ci + 1}`).join(", ")})`;
+          }
+          return `(${rowPh})`;
+        });
+        const sql = `INSERT INTO ${fq} (${qCols}) VALUES ${valueGroups.join(", ")}`;
+        const params = batch.flatMap((row) => colOrder!.map((c) => row[c]));
+        try {
+          await h.sql!.query(sql, params);
+          inserted += batch.length;
+        } catch {
+          for (const row of batch) {
+            try {
+              const ph =
+                dialect === "pg" || dialect === "snowflake"
+                  ? colOrder!.map((_, i) => `$${i + 1}`).join(", ")
+                  : colOrder!.map(() => "?").join(", ");
+              const one = `INSERT INTO ${fq} (${qCols}) VALUES (${ph})`;
+              await h.sql!.query(one, colOrder!.map((c) => row[c]));
+              inserted++;
+            } catch {
+              failed++;
+            }
+          }
+        }
+        job.processed += batch.length;
+        batch = [];
+      };
+
       const stream = createReadStream(opts.filePath).pipe(
         csv({ headers: opts.hasHeader !== false }),
       );
@@ -110,32 +159,19 @@ export function startImportJob(opts: {
         if (jobs.get(jobId)?.status === "cancelled") break;
         const cols = Object.keys(row as Record<string, unknown>);
         if (!cols.length) continue;
-        const placeholders =
-          dialect === "pg" || dialect === "snowflake"
-            ? cols.map((_, i) => `$${i + 1}`).join(", ")
-            : cols.map(() => "?").join(", ");
-        const qCols = cols
-          .map((c) =>
-            dialect === "mysql"
-              ? `\`${c.replaceAll("`", "``")}\``
-              : `"${c.replaceAll('"', '""')}"`,
-          )
-          .join(", ");
-        const sql = `INSERT INTO ${fq} (${qCols}) VALUES (${placeholders})`;
-        try {
-          await h.sql!.query(sql, cols.map((c) => (row as Record<string, unknown>)[c]));
-          inserted++;
-        } catch {
-          failed++;
-        }
-        job.processed++;
-        if (job.processed % 1000 === 0) {
-          job.inserted = inserted;
-          job.failed = failed;
-          job.message = `Row ${job.processed} — ${inserted} inserted`;
-          emit(job);
+        if (!colOrder) colOrder = cols;
+        batch.push(row as Record<string, unknown>);
+        if (batch.length >= BATCH) {
+          await flushBatch();
+          if (job.processed > 0 && job.processed % 1000 === 0) {
+            job.inserted = inserted;
+            job.failed = failed;
+            job.message = `Row ${job.processed} — ${inserted} inserted`;
+            emit(job);
+          }
         }
       }
+      await flushBatch();
       job.inserted = inserted;
       job.failed = failed;
       job.status = "done";

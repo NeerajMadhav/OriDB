@@ -1,11 +1,13 @@
 /**
- * Open a local SQLite file — upload copy or use an absolute path on this machine.
+ * Open a local SQLite file — upload a copy (browse) OR open by absolute path on this machine.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { FolderOpen, HardDriveUpload, Loader2 } from "lucide-react";
+import type { DragEvent } from "react";
+import { FolderOpen, HardDriveUpload, Loader2, X } from "lucide-react";
 import { api } from "../api/client";
 import { useSessionStore } from "../stores/sessionStore";
 import { useUiStore } from "../stores/uiStore";
+import { isBrowserFakePath, looksLikeServerPath } from "../lib/sqlitePathInput";
 import { Btn, Input, Label } from "./ui";
 
 type LibraryFile = {
@@ -20,7 +22,11 @@ type OpenResult = {
   connected: boolean;
   created: boolean;
   resolvedPath: string;
+  fileName?: string;
 };
+
+const SQLITE_ACCEPT =
+  ".db,.sqlite,.sqlite3,.db3,application/x-sqlite3,application/vnd.sqlite3";
 
 export function OpenSqlitePanel({
   onOpened,
@@ -36,6 +42,9 @@ export function OpenSqlitePanel({
   const [name, setName] = useState("");
   const [readOnly, setReadOnly] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState<"upload" | "path" | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [dragOver, setDragOver] = useState(false);
   const [verified, setVerified] = useState<{
     resolvedPath: string;
     size?: number;
@@ -56,53 +65,91 @@ export function OpenSqlitePanel({
       .catch(() => setHints(null));
   }, [refreshLibrary]);
 
-  const finishOpen = (r: OpenResult) => {
+  const clearSelectedFile = () => {
+    setSelectedFile(null);
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const finishOpen = (r: OpenResult, via: "upload" | "path") => {
     if (r.connected) {
       setActive(r.connection.id, true, {
         name: r.connection.name,
         engine: "sqlite",
       });
     }
+    clearSelectedFile();
+    setPath("");
+    setVerified(null);
     pushToast({
       type: "success",
-      message: r.created
-        ? `Opened ${r.connection.name}`
-        : `Reconnected to ${r.connection.name}`,
+      message:
+        via === "upload"
+          ? `Uploaded and opened ${r.connection.name}`
+          : r.created
+            ? `Opened ${r.connection.name}`
+            : `Reconnected to ${r.connection.name}`,
     });
     onOpened?.(r.connection.id);
   };
 
-  const verifyPath = async () => {
-    if (!path.trim()) return;
+  const verifyPath = async (rawPath?: string) => {
+    const input = (rawPath ?? path).trim();
+    if (!input) return null;
+    if (isBrowserFakePath(input)) {
+      pushToast({
+        type: "error",
+        message:
+          "That path came from the file picker and is not valid here. Use “Upload & connect” above instead.",
+      });
+      return null;
+    }
+    if (!looksLikeServerPath(input)) {
+      pushToast({
+        type: "error",
+        message: "Enter the full file path (e.g. C:\\Users\\you\\project\\data.db).",
+      });
+      return null;
+    }
     setBusy(true);
+    setBusyAction("path");
     try {
       const r = await api<{
         ok: boolean;
         resolvedPath: string;
         stat?: { size: number };
+        isSqliteName?: boolean;
       }>("/connections/sqlite/verify-path", {
         method: "POST",
-        body: JSON.stringify({ path: path.trim() }),
+        body: JSON.stringify({ path: input }),
       });
       if (!r.ok) {
         setVerified(null);
-        pushToast({ type: "error", message: "File not found on this machine" });
-        return;
+        const msg =
+          r.isSqliteName === false
+            ? "File must end with .db, .sqlite, .sqlite3, or .db3"
+            : "File not found on this machine";
+        pushToast({ type: "error", message: msg });
+        return null;
       }
-      setVerified({ resolvedPath: r.resolvedPath, size: r.stat?.size });
+      const v = { resolvedPath: r.resolvedPath, size: r.stat?.size };
+      setVerified(v);
       if (!name.trim()) {
         const base = r.resolvedPath.split(/[/\\]/).pop() ?? "SQLite";
-        setName(base.replace(/\.(db|sqlite3?)$/i, ""));
+        setName(base.replace(/\.(db|sqlite3?|db3)$/i, ""));
       }
+      return v;
     } catch (e) {
       pushToast({ type: "error", message: (e as Error).message });
+      return null;
     } finally {
       setBusy(false);
+      setBusyAction(null);
     }
   };
 
   const openPath = async (filePath: string, displayName?: string) => {
     setBusy(true);
+    setBusyAction("path");
     try {
       const r = await api<OpenResult>("/connections/sqlite/open-path", {
         method: "POST",
@@ -113,34 +160,76 @@ export function OpenSqlitePanel({
           connect: true,
         }),
       });
-      finishOpen(r);
+      finishOpen(r, "path");
+      refreshLibrary();
     } catch (e) {
       pushToast({ type: "error", message: (e as Error).message });
     } finally {
       setBusy(false);
+      setBusyAction(null);
     }
   };
 
-  const uploadFile = async (file: File) => {
+  const openByPathFlow = async () => {
+    clearSelectedFile();
+    const trimmed = path.trim();
+    if (!trimmed) return;
+    let target = verified?.resolvedPath;
+    if (!target) {
+      const v = await verifyPath(trimmed);
+      if (!v) return;
+      target = v.resolvedPath;
+    }
+    await openPath(target);
+  };
+
+  const uploadSelectedFile = async () => {
+    if (!selectedFile) return;
     setBusy(true);
+    setBusyAction("upload");
     try {
       const fd = new FormData();
-      fd.append("file", file);
-      if (name.trim()) fd.append("name", name.trim());
+      fd.append("file", selectedFile);
+      const displayName =
+        name.trim() ||
+        selectedFile.name.replace(/\.(db|sqlite3?|db3)$/i, "") ||
+        "SQLite";
+      fd.append("name", displayName);
       fd.append("readOnly", readOnly ? "true" : "false");
       fd.append("connect", "true");
       const r = await api<OpenResult>("/connections/sqlite/upload", {
         method: "POST",
         body: fd,
       });
-      finishOpen(r);
+      finishOpen(r, "upload");
       refreshLibrary();
     } catch (e) {
       pushToast({ type: "error", message: (e as Error).message });
     } finally {
       setBusy(false);
+      setBusyAction(null);
     }
   };
+
+  const onPickFile = (file: File | null) => {
+    if (!file) return;
+    setSelectedFile(file);
+    setPath("");
+    setVerified(null);
+    if (!name.trim()) {
+      setName(file.name.replace(/\.(db|sqlite3?|db3)$/i, "") || file.name);
+    }
+  };
+
+  const onDrop = (e: DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) onPickFile(file);
+  };
+
+  const uploadBusy = busy && busyAction === "upload";
+  const pathBusy = busy && busyAction === "path";
 
   return (
     <div
@@ -151,68 +240,132 @@ export function OpenSqlitePanel({
           Open local SQLite database
         </h3>
         <p className="text-text-muted mt-1 text-xs leading-relaxed">
-          Browse for a <code className="text-text-secondary">.db</code> file on your
-          computer, paste a full path, or upload a copy into{" "}
-          <span className="font-mono text-[10px]">
-            {hints?.databasesDir ?? "~/.oridb/databases"}
-          </span>
-          .
+          Use <strong className="text-text-secondary">Upload</strong> when you pick a file in
+          the browser. Use <strong className="text-text-secondary">Path</strong> only for a file
+          already on this PC (full path).
         </p>
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        <Btn
-          variant="primary"
-          size="sm"
-          className="gap-1.5"
-          disabled={busy}
-          onClick={() => fileRef.current?.click()}
-        >
-          {busy ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
+      <section
+        className={`mb-4 rounded-lg border-2 border-dashed p-4 transition-colors ${
+          dragOver
+            ? "border-primary bg-primary/10"
+            : "border-primary/30 bg-surface/50"
+        }`}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={onDrop}
+      >
+        <p className="text-text-muted mb-2 text-[11px] font-semibold tracking-wide uppercase">
+          1 — Upload a copy
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <Btn
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="gap-1.5"
+            disabled={busy}
+            onClick={() => fileRef.current?.click()}
+          >
             <HardDriveUpload className="h-3.5 w-3.5" />
-          )}
-          Browse &amp; open file
-        </Btn>
+            Choose file
+          </Btn>
+          <Btn
+            type="button"
+            variant="primary"
+            size="sm"
+            className="gap-1.5"
+            disabled={!selectedFile || busy}
+            onClick={() => void uploadSelectedFile()}
+          >
+            {uploadBusy ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <HardDriveUpload className="h-3.5 w-3.5" />
+            )}
+            Upload &amp; connect
+          </Btn>
+        </div>
         <input
           ref={fileRef}
           type="file"
-          accept=".db,.sqlite,.sqlite3,.db3,application/x-sqlite3"
+          accept={SQLITE_ACCEPT}
           className="hidden"
           onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) void uploadFile(f);
+            onPickFile(e.target.files?.[0] ?? null);
             e.target.value = "";
           }}
         />
-      </div>
+        {selectedFile ? (
+          <div className="bg-primary/10 mt-3 flex items-start gap-2 rounded-md px-3 py-2 text-xs">
+            <span className="text-text-primary min-w-0 flex-1 break-all">
+              Selected: <strong>{selectedFile.name}</strong>
+              {selectedFile.size > 0
+                ? ` (${Math.round(selectedFile.size / 1024)} KB)`
+                : ""}
+            </span>
+            <button
+              type="button"
+              className="text-text-muted hover:text-text-primary shrink-0"
+              aria-label="Clear selected file"
+              onClick={clearSelectedFile}
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        ) : (
+          <p className="text-text-muted mt-2 text-xs">
+            Copies into{" "}
+            <span className="font-mono text-[10px]">
+              {hints?.databasesDir ?? "~/.oridb/databases"}
+            </span>
+            , then connects.
+          </p>
+        )}
+      </section>
 
-      <div className="mt-4 space-y-3">
+      <section className="border-border space-y-3 border-t pt-4">
+        <p className="text-text-muted text-[11px] font-semibold tracking-wide uppercase">
+          2 — Open file on disk (path)
+        </p>
         <div>
-          <Label>File path on this computer</Label>
+          <Label>Full path on this computer</Label>
           <div className="mt-1 flex gap-2">
             <Input
               placeholder="C:\Users\you\project\data.db"
               value={path}
+              disabled={!!selectedFile}
               onChange={(e) => {
                 setPath(e.target.value);
                 setVerified(null);
               }}
               onKeyDown={(e) => {
-                if (e.key === "Enter") void verifyPath();
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void openByPathFlow();
+                }
               }}
             />
             <Btn
+              type="button"
               variant="secondary"
               size="sm"
               className="shrink-0"
-              disabled={busy || !path.trim()}
+              disabled={pathBusy || !path.trim() || !!selectedFile}
               onClick={() => void verifyPath()}
             >
               Check
             </Btn>
           </div>
+          {selectedFile && (
+            <p className="text-text-muted mt-1 text-xs">
+              Clear the selected upload above to use path mode.
+            </p>
+          )}
           {verified && (
             <p className="text-success mt-1 font-mono text-[10px] break-all">
               {verified.resolvedPath}
@@ -244,16 +397,21 @@ export function OpenSqlitePanel({
         </div>
 
         <Btn
+          type="button"
           variant="secondary"
           size="sm"
           className="gap-1.5"
-          disabled={busy || !path.trim()}
-          onClick={() => void openPath(verified?.resolvedPath ?? path.trim())}
+          disabled={pathBusy || !path.trim() || !!selectedFile}
+          onClick={() => void openByPathFlow()}
         >
-          <FolderOpen className="h-3.5 w-3.5" />
+          {pathBusy ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <FolderOpen className="h-3.5 w-3.5" />
+          )}
           Open path &amp; connect
         </Btn>
-      </div>
+      </section>
 
       {library.length > 0 && (
         <div className="border-border mt-4 border-t pt-3">
@@ -269,7 +427,7 @@ export function OpenSqlitePanel({
                   disabled={busy}
                   onClick={() => void openPath(f.path, f.name.replace(/\.[^.]+$/, ""))}
                 >
-                  <span className="truncate font-medium">{f.name}</span>
+                  <span className="min-w-0 flex-1 break-words font-medium">{f.name}</span>
                   <span className="text-text-muted shrink-0 font-mono text-[10px]">
                     {Math.round(f.size / 1024)} KB
                   </span>

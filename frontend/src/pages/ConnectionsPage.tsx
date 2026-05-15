@@ -3,7 +3,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
   Database,
@@ -18,6 +18,10 @@ import { useSessionStore } from "../stores/sessionStore";
 import { useUiStore } from "../stores/uiStore";
 import { OpenSqlitePanel } from "../components/OpenSqlitePanel";
 import { Btn, Card, EngineBadge, Input, Label, Select } from "../components/ui";
+import {
+  computeConnectionStats,
+  formatConnectionSubtitle,
+} from "../lib/connectionDisplay";
 
 type Conn = {
   id: string;
@@ -31,6 +35,7 @@ type Conn = {
   ssl?: boolean;
   readOnly?: boolean;
   connectionUrl?: string;
+  hasConnectionUrl?: boolean;
   warehouse?: string;
   role?: string;
   defaultSchema?: string;
@@ -42,7 +47,7 @@ type ParsedConn = Partial<Conn> & {
 };
 
 const URL_PREFIX =
-  /^(postgres(ql)?|mysql|mariadb|mongodb(\+srv)?|redis(s)?|snowflake|clickhouse|sqlserver|mssql|jdbc|file):|^.+\.(db|sqlite|sqlite3|db3)$/i;
+  /^(postgres(ql)?|mysql|mariadb|mongodb|redis|snowflake|clickhouse|sqlserver|mssql|jdbc|file)(\+[a-z0-9_.-]+)?:|^.+\.(db|sqlite|sqlite3|db3)$/i;
 
 const engines = [
   "postgresql",
@@ -88,8 +93,16 @@ const PORTS: Record<string, number> = {
   sqlserver: 1433,
 };
 
+type ConnMode = "server" | "sqlite";
+
 export function ConnectionsPage() {
   const nav = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const mode: ConnMode =
+    searchParams.get("mode") === "sqlite" ? "sqlite" : "server";
+  const setMode = (m: ConnMode) => {
+    setSearchParams(m === "sqlite" ? { mode: "sqlite" } : {}, { replace: true });
+  };
   const pushToast = useUiStore((s) => s.pushToast);
   const setActive = useSessionStore((s) => s.setActive);
   const activeConnectionId = useSessionStore((s) => s.activeConnectionId);
@@ -319,6 +332,7 @@ export function ConnectionsPage() {
   }, [urlPaste]); // eslint-disable-line react-hooks/exhaustive-deps -- parseUrl uses latest state
 
   const editingConn = editingId ? list.find((c) => c.id === editingId) : null;
+  const stats = computeConnectionStats(list, activeConnectionId);
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
@@ -334,12 +348,47 @@ export function ConnectionsPage() {
           Connections
         </h1>
         <p className="text-text-secondary mt-1 text-sm">
-          Create, edit, and manage saved database profiles.
+          Pick a saved profile on the left, connect, or add a new database below.
         </p>
       </div>
 
+      {list.length > 0 && (
+        <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <StatCard label="Saved profiles" value={String(stats.total)} />
+          <StatCard
+            label="Server databases"
+            value={String(stats.server)}
+            hint={`${stats.sqlite} SQLite`}
+          />
+          <StatCard
+            label="SSL enabled"
+            value={String(stats.ssl)}
+            hint={stats.readOnly > 0 ? `${stats.readOnly} read-only` : undefined}
+          />
+          <StatCard
+            label="Active session"
+            value={
+              stats.activeId
+                ? (list.find((c) => c.id === stats.activeId)?.name ?? "Connected")
+                : "None"
+            }
+            hint={
+              stats.activeId
+                ? formatConnectionSubtitle(
+                    list.find((c) => c.id === stats.activeId) ?? {
+                      name: "",
+                      engine: "",
+                    },
+                  )
+                : "Click Connect on a profile"
+            }
+            active={!!stats.activeId}
+          />
+        </div>
+      )}
+
       <div className="flex flex-col gap-6 lg:flex-row">
-        <Card className="lg:w-[380px] shrink-0" padding="md">
+        <Card className="w-full shrink-0 lg:w-[min(100%,440px)]" padding="md">
           <div className="mb-4 flex items-center justify-between gap-2">
             <h2 className="text-text-muted text-[11px] font-semibold tracking-widest uppercase">
               Saved
@@ -353,36 +402,63 @@ export function ConnectionsPage() {
             </div>
           </div>
 
-          <div className="oridb-scrollbar max-h-[min(520px,60vh)] space-y-1 overflow-y-auto">
+          <div className="oridb-scrollbar max-h-[min(520px,60vh)] space-y-2 overflow-y-auto">
             {list.length === 0 ? (
               <p className="text-text-muted py-8 text-center text-xs">
                 No saved connections yet. Click New or fill in the form.
               </p>
             ) : (
-              list.map((c) => (
+              list.map((c) => {
+                const isActive = activeConnectionId === c.id;
+                const subtitle = formatConnectionSubtitle(c);
+                return (
                 <div
                   key={c.id}
-                  className={`oridb-connection-row flex-wrap ${
-                    editingId === c.id ? "ring-primary/40 bg-primary/5 ring-1" : ""
+                  className={`rounded-lg border transition-colors ${
+                    editingId === c.id
+                      ? "border-primary/40 bg-primary/5 ring-primary/30 ring-1"
+                      : "border-border-subtle hover:border-border hover:bg-bg/80"
                   }`}
                 >
                   <button
                     type="button"
-                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                    className="flex w-full items-start gap-2.5 p-2.5 text-left"
                     onClick={() => startEdit(c)}
                   >
-                    <span className="bg-primary/10 text-primary flex h-9 w-9 shrink-0 items-center justify-center rounded-lg">
+                    <span className="bg-primary/10 text-primary mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg">
                       <Database className="h-4 w-4" />
                     </span>
                     <span className="min-w-0 flex-1">
-                      <p className="text-text-primary truncate font-medium">{c.name}</p>
-                      <p className="text-text-muted truncate text-xs">
-                        {c.host ?? c.engine}
+                      <p className="text-text-primary text-sm leading-snug font-medium break-words">
+                        {c.name}
                       </p>
+                      <p
+                        className="text-text-muted mt-0.5 text-xs leading-relaxed break-all"
+                        title={subtitle}
+                      >
+                        {subtitle}
+                      </p>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        <EngineBadge engine={c.engine} />
+                        {isActive && (
+                          <span className="bg-success/15 text-success rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase">
+                            Active
+                          </span>
+                        )}
+                        {c.ssl && (
+                          <span className="text-text-muted rounded bg-bg px-1.5 py-0.5 text-[10px] font-medium">
+                            SSL
+                          </span>
+                        )}
+                        {c.readOnly && (
+                          <span className="text-text-muted rounded bg-bg px-1.5 py-0.5 text-[10px] font-medium">
+                            Read-only
+                          </span>
+                        )}
+                      </div>
                     </span>
                   </button>
-                  <EngineBadge engine={c.engine} />
-                  <div className="flex shrink-0 gap-1">
+                  <div className="border-border-subtle flex flex-wrap justify-end gap-1 border-t px-2 py-1.5">
                     <Btn
                       variant="ghost"
                       size="sm"
@@ -432,20 +508,48 @@ export function ConnectionsPage() {
                     </Btn>
                   </div>
                 </div>
-              ))
+                );
+              })
             )}
           </div>
         </Card>
 
         <Card className="min-w-0 flex-1" padding="lg">
-          <OpenSqlitePanel
-            onOpened={() => {
-              void refresh();
-              nav("/workspace");
-            }}
-          />
+          <div className="border-border mb-6 flex gap-1 rounded-lg border p-1">
+            <button
+              type="button"
+              className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                mode === "server"
+                  ? "bg-primary text-white"
+                  : "text-text-secondary hover:bg-selection/50"
+              }`}
+              onClick={() => setMode("server")}
+            >
+              Database server
+            </button>
+            <button
+              type="button"
+              className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                mode === "sqlite"
+                  ? "bg-primary text-white"
+                  : "text-text-secondary hover:bg-selection/50"
+              }`}
+              onClick={() => setMode("sqlite")}
+            >
+              SQLite file
+            </button>
+          </div>
 
-          <div className="mb-6 mt-6 flex flex-wrap items-start justify-between gap-2">
+          {mode === "sqlite" ? (
+            <OpenSqlitePanel
+              onOpened={() => {
+                void refresh();
+                nav("/workspace");
+              }}
+            />
+          ) : (
+            <>
+          <div className="mb-6 flex flex-wrap items-start justify-between gap-2">
             <div>
               <h2 className="text-text-primary text-lg font-semibold">
                 {editingId ? "Edit connection" : "New connection"}
@@ -466,11 +570,12 @@ export function ConnectionsPage() {
           <div className="mb-6">
             <Label>Connection string</Label>
             <p className="text-text-muted mb-2 text-xs">
-              Neon, Supabase, RDS, Snowflake, ClickHouse, SQL Server, and standard URLs are auto-detected.
+              Supports standard URLs and driver-style schemes (e.g. postgresql+psycopg2://, mysql+pymysql://).
+              Neon, Supabase, RDS, Snowflake, and more are auto-detected.
             </p>
             <div className="flex gap-2">
               <Input
-                placeholder="postgresql://user:pass@host.neon.tech/neondb?sslmode=require"
+                placeholder="postgresql+psycopg2://user:pass@host.rds.amazonaws.com:5432/mydb"
                 value={urlPaste}
                 onChange={(e) => setUrlPaste(e.target.value)}
                 onPaste={() => {
@@ -690,8 +795,45 @@ export function ConnectionsPage() {
               </Btn>
             </div>
           )}
+            </>
+          )}
         </Card>
       </div>
+    </div>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  hint,
+  active,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  active?: boolean;
+}) {
+  return (
+    <div
+      className={`border-border-subtle rounded-lg border px-4 py-3 ${
+        active ? "border-success/30 bg-success/5" : "bg-surface"
+      }`}
+    >
+      <p className="text-text-muted text-[10px] font-semibold tracking-widest uppercase">
+        {label}
+      </p>
+      <p
+        className="text-text-primary mt-1 text-lg font-semibold break-words leading-snug"
+        title={value}
+      >
+        {value}
+      </p>
+      {hint && (
+        <p className="text-text-muted mt-0.5 truncate text-xs" title={hint}>
+          {hint}
+        </p>
+      )}
     </div>
   );
 }
@@ -712,3 +854,4 @@ function Field({
     </label>
   );
 }
+

@@ -36,7 +36,7 @@ export function WorkspaceLayout({
           {!hideSide && (
             <>
               <Panel defaultSize={18} minSize={12} maxSize={35}>
-                <div className="bg-surface-elevated flex h-full flex-col shadow-sm">
+                <div className="bg-surface-elevated flex h-full flex-col pl-7 shadow-sm">
                   {sidebar}
                 </div>
               </Panel>

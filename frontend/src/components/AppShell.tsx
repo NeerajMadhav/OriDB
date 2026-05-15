@@ -73,27 +73,41 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [theme]);
 
   useEffect(() => {
-    const ws = new WebSocket(
-      `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`,
-    );
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "subscribe", channel: "notifications" }));
-    };
-    ws.onmessage = (ev) => {
-      try {
-        const d = JSON.parse(String(ev.data));
-        if (d.type === "notify") {
-          useNotificationStore.getState().push({
-            type: "info",
-            title: String(d.title ?? "Notice"),
-            body: d.body ? String(d.body) : undefined,
-          });
+    let ws: WebSocket | null = null;
+    try {
+      ws = new WebSocket(
+        `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`,
+      );
+      ws.onopen = () => {
+        ws?.send(JSON.stringify({ type: "subscribe", channel: "notifications" }));
+      };
+      ws.onmessage = (ev) => {
+        try {
+          const d = JSON.parse(String(ev.data));
+          if (d.type === "notify") {
+            useNotificationStore.getState().push({
+              type: "info",
+              title: String(d.title ?? "Notice"),
+              body: d.body ? String(d.body) : undefined,
+            });
+          }
+        } catch {
+          /* ignore */
         }
+      };
+      ws.onerror = () => {
+        /* backend may be offline — UI still works */
+      };
+    } catch {
+      /* ignore WebSocket unavailable */
+    }
+    return () => {
+      try {
+        ws?.close();
       } catch {
         /* ignore */
       }
     };
-    return () => ws.close();
   }, []);
 
   const activeId = useSessionStore((s) => s.activeConnectionId);

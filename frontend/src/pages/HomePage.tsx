@@ -1,14 +1,14 @@
 /**
- * Landing — welcome when no connection active; recent connections.
+ * Landing — connect to a saved profile or open workspace.
  */
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ArrowRight, Database, Upload } from "lucide-react";
+import { ArrowRight, Database } from "lucide-react";
 import { api } from "../api/client";
 import { useSessionStore } from "../stores/sessionStore";
 import { useUiStore } from "../stores/uiStore";
-import { OpenSqlitePanel } from "../components/OpenSqlitePanel";
 import { Btn, Card, EngineBadge, Kbd } from "../components/ui";
+import { formatConnectionSubtitle } from "../lib/connectionDisplay";
 
 type Conn = {
   id: string;
@@ -16,7 +16,6 @@ type Conn = {
   engine: string;
   host?: string;
   environment?: string;
-  lastConnectedAt?: string;
   defaultSchema?: string;
 };
 
@@ -40,10 +39,12 @@ export function HomePage() {
   const setActive = useSessionStore((s) => s.setActive);
   const pushToast = useUiStore((s) => s.pushToast);
   const [recent, setRecent] = useState<Conn[]>([]);
+  const [allCount, setAllCount] = useState(0);
 
   useEffect(() => {
     void api<{ connections: Conn[] }>("/connections")
       .then((r) => {
+        setAllCount(r.connections.length);
         const ids = loadRecent();
         setRecent(
           ids
@@ -67,7 +68,7 @@ export function HomePage() {
       setActive(c.id, true, {
         name: c.name,
         engine: c.engine,
-        defaultSchema: (c as Conn & { defaultSchema?: string }).defaultSchema,
+        defaultSchema: c.defaultSchema,
       });
       pushToast({ type: "success", message: `Connected to ${c.name}` });
       nav("/workspace");
@@ -85,40 +86,41 @@ export function HomePage() {
         <h1 className="text-text-primary mb-2 text-4xl font-semibold tracking-tight">
           <span className="text-primary">Ori</span>DB
         </h1>
-        <p className="text-text-secondary mx-auto max-w-sm text-sm leading-relaxed">
-          Your universal database workspace — connect, query, and explore with a calm, focused UI.
+        <p className="text-text-secondary mx-auto max-w-md text-sm leading-relaxed">
+          Connect once, then query and explore in Workspace. Add PostgreSQL, MySQL, SQLite, and more
+          from a single place.
         </p>
       </div>
 
-      <div className="mb-10 flex flex-wrap justify-center gap-3">
+      <div className="mb-10 flex flex-col items-center gap-3 sm:flex-row">
         <Link to="/connections">
-          <Btn variant="primary" className="gap-2 px-6">
+          <Btn variant="primary" className="gap-2 px-8">
             <Database className="h-4 w-4" />
-            New connection
+            {allCount > 0 ? "Connections" : "Add your first connection"}
           </Btn>
         </Link>
-        <Link to="/connections">
-          <Btn variant="secondary" className="gap-2 px-6">
-            <Upload className="h-4 w-4" />
-            Import connection
-          </Btn>
-        </Link>
+        {allCount > 0 && (
+          <Link to="/workspace">
+            <Btn variant="secondary" className="gap-2 px-6">
+              Open workspace
+              <ArrowRight className="h-4 w-4" />
+            </Btn>
+          </Link>
+        )}
       </div>
 
-      <div className="mb-10 w-full max-w-xl">
-        <OpenSqlitePanel
-          compact
-          onOpened={(id) => {
-            pushRecent(id);
-            nav("/workspace");
-          }}
-        />
-      </div>
+      <p className="text-text-muted mb-10 max-w-md text-center text-xs">
+        Local <strong className="text-text-secondary">.db</strong> file? Open Connections →{" "}
+        <Link to="/connections?mode=sqlite" className="text-primary underline">
+          SQLite file
+        </Link>
+        .
+      </p>
 
       {recent.length > 0 && (
         <Card className="w-full max-w-lg" padding="md">
           <h2 className="text-text-muted mb-4 text-[11px] font-semibold tracking-widest uppercase">
-            Recent connections
+            Recent — click to connect & open workspace
           </h2>
           <ul className="space-y-1">
             {recent.map((c) => (
@@ -132,17 +134,17 @@ export function HomePage() {
                     <Database className="h-4 w-4" />
                   </span>
                   <span className="min-w-0 flex-1 text-left">
-                    <span className="text-text-primary block truncate font-medium">{c.name}</span>
-                    <span className="text-text-muted block truncate text-xs">
-                      {c.host ?? c.engine}
+                    <span className="text-text-primary block text-sm font-medium break-words">
+                      {c.name}
+                    </span>
+                    <span
+                      className="text-text-muted block text-xs break-all"
+                      title={formatConnectionSubtitle(c)}
+                    >
+                      {formatConnectionSubtitle(c)}
                     </span>
                   </span>
                   <EngineBadge engine={c.engine} />
-                  {c.environment && (
-                    <span className="text-text-muted hidden rounded-md bg-bg px-2 py-0.5 text-[10px] uppercase sm:inline">
-                      {c.environment}
-                    </span>
-                  )}
                   <ArrowRight className="text-text-muted h-4 w-4 shrink-0 opacity-0 transition-opacity group-hover:opacity-100" />
                 </button>
               </li>
@@ -159,3 +161,4 @@ export function HomePage() {
     </div>
   );
 }
+

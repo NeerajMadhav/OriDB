@@ -7,9 +7,31 @@ import { getOriDbHome } from "../paths/oridbHome.js";
 
 const SQLITE_EXT = /\.(db|sqlite|sqlite3|db3)$/i;
 
+/** Trim user paste; strip wrapping quotes from Explorer copy-paste. */
+export function normalizePathInput(input: string): string {
+  let raw = input.trim();
+  if (
+    (raw.startsWith('"') && raw.endsWith('"')) ||
+    (raw.startsWith("'") && raw.endsWith("'"))
+  ) {
+    raw = raw.slice(1, -1).trim();
+  }
+  return raw;
+}
+
 export function isSqliteFilePath(input: string): boolean {
-  const base = path.basename(input.trim());
+  const base = path.basename(normalizePathInput(input));
   return SQLITE_EXT.test(base);
+}
+
+/** Compare resolved paths (case-insensitive on Windows). */
+export function sqlitePathsEqual(a: string, b: string): boolean {
+  const na = path.normalize(a);
+  const nb = path.normalize(b);
+  if (process.platform === "win32") {
+    return na.toLowerCase() === nb.toLowerCase();
+  }
+  return na === nb;
 }
 
 export function sqliteDatabasesDir(): string {
@@ -18,7 +40,7 @@ export function sqliteDatabasesDir(): string {
 
 /** Turn user input, file:// URL, or relative path into an absolute normalized path. */
 export function resolveSqlitePath(input: string): string {
-  let raw = input.trim();
+  let raw = normalizePathInput(input);
   if (/^file:\/\//i.test(raw)) {
     try {
       const u = new URL(raw);

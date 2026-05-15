@@ -1,9 +1,9 @@
 /**
- * Local audit log for queries and auth events (web mode).
+ * Local audit log for queries and auth events (web mode, debounced writes).
  */
-import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { ensureDir, getOriDbHome, oridbFile } from "../paths/oridbHome.js";
+import { loadJsonFile, saveJsonFile } from "../util/jsonFileStore.js";
 
 export type AuditEntry = {
   id: string;
@@ -21,17 +21,12 @@ const file = () => oridbFile("audit-log.json");
 const MAX = 5000;
 
 function load(): AuditEntry[] {
-  if (!fs.existsSync(file())) return [];
-  try {
-    return JSON.parse(fs.readFileSync(file(), "utf8")) as AuditEntry[];
-  } catch {
-    return [];
-  }
+  return loadJsonFile<AuditEntry[]>(file(), []);
 }
 
 function save(entries: AuditEntry[]): void {
   ensureDir(getOriDbHome());
-  fs.writeFileSync(file(), JSON.stringify(entries.slice(0, MAX), null, 0), "utf8");
+  saveJsonFile(file(), entries.slice(0, MAX));
 }
 
 export function appendAudit(

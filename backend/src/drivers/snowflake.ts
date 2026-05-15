@@ -7,10 +7,6 @@ import type { SqlDriver, QueryResult } from "./sqlTypes.js";
 
 type SnowflakeConn = snowflake.Connection;
 
-function quoteIdent(name: string): string {
-  return `"${name.replace(/"/g, '""')}"`;
-}
-
 function parseSnowflakeOptions(cfg: ConnectionConfig): {
   account: string;
   username: string;
@@ -188,5 +184,3 @@ export function createSnowflakeDriver(cfg: ConnectionConfig): SqlDriver {
     },
   };
 }
-
-export { quoteIdent as snowflakeQuoteIdent };

@@ -21,10 +21,22 @@ export type EditorTab = {
   lastMessages?: string[];
 };
 
+export type InspectorCellContext = {
+  type: "cell";
+  column: string;
+  table?: string;
+  schema?: string;
+  rowIndex: number;
+  value: unknown;
+  displayValue: string;
+  valueType: string;
+};
+
 export type InspectorContext =
   | { type: "none" }
   | { type: "table"; table: string; stats?: Record<string, unknown> }
   | { type: "column"; table: string; column: string; stats?: Record<string, unknown> }
+  | InspectorCellContext
   | { type: "query"; durationMs?: number; rows?: number; status?: string };
 
 type WorkspaceState = {
@@ -49,7 +61,14 @@ type WorkspaceState = {
 export const useWorkspaceStore = create<WorkspaceState>()(
   persist(
     (set, get) => ({
-      tabs: [{ id: "default", title: "Query 1", kind: "query", sql: "SELECT 1 AS one;" }],
+      tabs: [
+        {
+          id: "default",
+          title: "Query 1",
+          kind: "query",
+          sql: "-- Write SQL here, then Run (Ctrl+Enter)\nSELECT 1 AS connected;\n",
+        },
+      ],
       activeTabId: "default",
       inspector: { type: "none" },
       lastQueryMs: null,
@@ -69,7 +88,19 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         const tabs = get().tabs.filter((t) => t.id !== id);
         const activeTabId =
           get().activeTabId === id ? (tabs[0]?.id ?? null) : get().activeTabId;
-        set({ tabs: tabs.length ? tabs : [{ id: "default", title: "Query 1", kind: "query" }], activeTabId });
+        set({
+          tabs: tabs.length
+            ? tabs
+            : [
+                {
+                  id: "default",
+                  title: "Query 1",
+                  kind: "query",
+                  sql: "-- Write SQL here, then Run (Ctrl+Enter)\nSELECT 1 AS connected;\n",
+                },
+              ],
+          activeTabId,
+        });
       },
       setActiveTab: (id) => set({ activeTabId: id }),
       updateTab: (id, patch) =>

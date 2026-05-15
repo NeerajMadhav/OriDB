@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import path from "node:path";
 import {
   isSqliteFilePath,
+  normalizePathInput,
   parseBareSqlitePath,
+  sqlitePathsEqual,
   suggestSqliteName,
 } from "./sqlitePath.js";
 import { parseConnectionUrl } from "./parseConnectionUrl.js";
@@ -21,6 +23,15 @@ describe("sqlitePath", () => {
 
   it("suggests display names from paths", () => {
     expect(suggestSqliteName("/foo/bar/my_app.sqlite")).toBe("my_app");
+  });
+
+  it("strips wrapping quotes from paths", () => {
+    expect(normalizePathInput('"C:\\data\\app.db"')).toBe("C:\\data\\app.db");
+  });
+
+  it("compares paths case-insensitively on Windows", () => {
+    if (process.platform !== "win32") return;
+    expect(sqlitePathsEqual("C:\\Data\\App.DB", "c:\\data\\app.db")).toBe(true);
   });
 });
 

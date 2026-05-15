@@ -139,21 +139,28 @@ connectionsRouter.get("/:id", (req, res) => {
   res.json({ connection: sanitizeForApi(c) });
 });
 
-connectionsRouter.post("/:id/connect", async (req, res) => {
-  const id = req.params.id;
-  const list = loadConnections();
-  const cfg = list.find((c) => c.id === id);
-  if (!cfg) {
-    res.status(404).json({ error: { code: "NOT_FOUND", message: "Connection" } });
-    return;
+connectionsRouter.post("/:id/connect", async (req, res, next) => {
+  try {
+    const id = req.params.id;
+    const cfg = loadConnections().find((c) => c.id === id);
+    if (!cfg) {
+      res.status(404).json({ error: { code: "NOT_FOUND", message: "Connection" } });
+      return;
+    }
+    await connectHandle(cfg);
+    res.json({ ok: true, connectionId: id });
+  } catch (e) {
+    next(e);
   }
-  await connectHandle(cfg);
-  res.json({ ok: true, connectionId: id });
 });
 
-connectionsRouter.post("/:id/disconnect", async (req, res) => {
-  await disconnectHandle(req.params.id);
-  res.json({ ok: true });
+connectionsRouter.post("/:id/disconnect", async (req, res, next) => {
+  try {
+    await disconnectHandle(req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    next(e);
+  }
 });
 
 connectionsRouter.get("/:id/status", (req, res) => {

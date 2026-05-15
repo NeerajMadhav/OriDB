@@ -1,8 +1,8 @@
 /**
- * Append-only query history stored under ~/.oridb/query-history.json (plaintext for MVP).
+ * Query history under ~/.oridb/query-history.json (debounced writes).
  */
-import fs from "node:fs";
 import { ensureDir, getOriDbHome, oridbFile } from "../paths/oridbHome.js";
+import { loadJsonFile, saveJsonFile } from "../util/jsonFileStore.js";
 
 export type HistoryEntry = {
   id: string;
@@ -15,25 +15,20 @@ export type HistoryEntry = {
 };
 
 const file = () => oridbFile("query-history.json");
+const MAX = 500;
 
 export function loadHistory(): HistoryEntry[] {
-  const p = file();
-  if (!fs.existsSync(p)) return [];
-  try {
-    return JSON.parse(fs.readFileSync(p, "utf8")) as HistoryEntry[];
-  } catch {
-    return [];
-  }
+  return loadJsonFile<HistoryEntry[]>(file(), []);
 }
 
 export function appendHistory(entry: HistoryEntry): void {
   ensureDir(getOriDbHome());
   const list = loadHistory();
   list.unshift(entry);
-  fs.writeFileSync(file(), JSON.stringify(list.slice(0, 500), null, 0), "utf8");
+  saveJsonFile(file(), list.slice(0, MAX));
 }
 
 export function clearHistory(): void {
   ensureDir(getOriDbHome());
-  fs.writeFileSync(file(), "[]", "utf8");
+  saveJsonFile(file(), []);
 }

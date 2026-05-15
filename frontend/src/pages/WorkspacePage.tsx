@@ -17,7 +17,11 @@ import { useSessionStore } from "../stores/sessionStore";
 import { useUiStore } from "../stores/uiStore";
 import { api, apiUrl } from "../api/client";
 import { QueryEditor, formatSql } from "../components/QueryEditor";
-import { VirtualDataGrid } from "../components/VirtualDataGrid";
+import { QuerySnippets } from "../components/QuerySnippets";
+import { buildQuerySnippets } from "../lib/querySnippets";
+import { VirtualDataGrid, type GridCellSelection } from "../components/VirtualDataGrid";
+import { buildInspectorCellContext } from "../lib/inspector";
+import { ErrorBoundary } from "../components/ErrorBoundary";
 import { VisualQueryBuilder } from "../components/VisualQueryBuilder";
 import { ErDiagramView } from "../components/ErDiagramView";
 import { diffResults } from "../lib/queryDiff";
@@ -205,6 +209,7 @@ export function WorkspaceShell() {
           </NavLink>
         ))}
       </nav>
+      <ErrorBoundary title="Workspace error">
       <WorkspaceLayout
         sidebar={
           <SchemaExplorer
@@ -228,6 +233,7 @@ export function WorkspaceShell() {
           </div>
         }
       />
+      </ErrorBoundary>
     </div>
   );
 }
@@ -248,11 +254,13 @@ export function QueryTab() {
   const connId = useConnId();
   const connected = useSessionStore((s) => s.connected);
   const engine = useSessionStore((s) => s.engine);
+  const schema = useSessionStore((s) => s.selectedSchema);
   const pushToast = useUiStore((s) => s.pushToast);
   const tabs = useWorkspaceStore((s) => s.tabs);
   const activeTabId = useWorkspaceStore((s) => s.activeTabId);
   const updateTab = useWorkspaceStore((s) => s.updateTab);
   const setActiveTab = useWorkspaceStore((s) => s.setActiveTab);
+  const setInspector = useWorkspaceStore((s) => s.setInspector);
 
   const queryTab =
     tabs.find((t) => t.id === activeTabId && t.kind === "query") ??
@@ -263,6 +271,17 @@ export function QueryTab() {
       setActiveTab(queryTab.id);
     }
   }, [activeTabId, queryTab, setActiveTab]);
+
+  useEffect(() => {
+    const onInsert = (e: Event) => {
+      const sql = (e as CustomEvent<{ sql: string }>).detail?.sql;
+      if (!sql || !queryTab) return;
+      updateTab(queryTab.id, { sql });
+      setActiveTab(queryTab.id);
+    };
+    window.addEventListener("oridb-insert-query", onInsert);
+    return () => window.removeEventListener("oridb-insert-query", onInsert);
+  }, [queryTab, updateTab, setActiveTab]);
 
   const sql = queryTab?.sql ?? "SELECT 1 AS one;";
   const setSql = (next: string) => {
@@ -346,6 +365,27 @@ export function QueryTab() {
   );
   const rows = last?.rows ?? [];
 
+  const handleCellSelect = useCallback(
+    (sel: GridCellSelection) => {
+      setInspector(buildInspectorCellContext(sel));
+    },
+    [setInspector],
+  );
+
+  const snippetTable =
+    tabs.find((t) => t.kind === "table" && t.table)?.table ??
+    tabs.find((t) => t.id === activeTabId && t.table)?.table;
+
+  const snippets = useMemo(
+    () =>
+      buildQuerySnippets({
+        dialect: sqlDialect(engine),
+        schema,
+        table: snippetTable,
+      }),
+    [engine, schema, snippetTable],
+  );
+
   const chartData = useMemo(() => {
     if (!last?.columns.length) return [];
     const nums = last.columns
@@ -398,22 +438,24 @@ export function QueryTab() {
           ))}
         </div>
       </div>
-      <div className="border-border bg-surface-elevated min-h-[200px] flex-1 rounded border">
-        <QueryEditor
-          value={sql}
-          onChange={setSql}
-          onRun={(q) => void run(q)}
-          dialect={sqlDialect(engine)}
-        />
-      </div>
+      <QuerySnippets snippets={snippets} onInsert={(q) => setSql(q)} />
+      <QueryEditor
+        value={sql}
+        onChange={setSql}
+        onRun={(q) => void run(q)}
+        dialect={sqlDialect(engine)}
+        connectionId={connId}
+        schema={schema}
+        heightPx={300}
+      />
       {view === "grid" && (
-        <div className="border-border bg-surface-elevated h-64 rounded border p-1">
+        <div className="border-border bg-surface-elevated min-h-[180px] flex-1 rounded border p-1">
           {cols.length === 0 ? (
             <p className="text-text-muted flex h-full items-center justify-center p-4 text-sm">
               Run a query to see results
             </p>
           ) : (
-            <VirtualDataGrid columns={cols} rows={rows} />
+            <VirtualDataGrid columns={cols} rows={rows} onCellSelect={handleCellSelect} />
           )}
         </div>
       )}

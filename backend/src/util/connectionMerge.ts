@@ -2,8 +2,47 @@
  * Merge connection updates — avoid stale connectionUrl overriding edited credentials.
  */
 import type { ConnectionConfig } from "../types/connection.js";
-import { sanitizePgConnectionString } from "./parseConnectionUrl.js";
+import {
+  normalizeDriverConnectionUrl,
+  sanitizePgConnectionString,
+} from "./parseConnectionUrl.js";
+import { pgPassword } from "./pgConnection.js";
 import { resolveSqlitePath } from "./sqlitePath.js";
+
+const PG_ENGINES = new Set([
+  "postgresql",
+  "neon",
+  "supabase",
+  "cockroachdb",
+]);
+
+function hydratePgFromUrl(cfg: ConnectionConfig): ConnectionConfig {
+  if (!PG_ENGINES.has(cfg.engine) || !cfg.connectionUrl?.trim()) {
+    return cfg;
+  }
+  const next = { ...cfg };
+  try {
+    const u = new URL(normalizeDriverConnectionUrl(cfg.connectionUrl));
+    if (!next.host?.trim() && u.hostname) next.host = u.hostname;
+    if (!next.port && u.port) next.port = Number(u.port);
+    if (!next.database?.trim() && u.pathname.length > 1) {
+      next.database = u.pathname.replace(/^\//, "").split("?")[0];
+    }
+    if (!next.username?.trim() && u.username) {
+      next.username = decodeURIComponent(u.username);
+    }
+    if (!next.password && u.password) {
+      next.password = decodeURIComponent(u.password);
+    }
+  } catch {
+    /* ignore */
+  }
+  if (!next.password && cfg.connectionUrl) {
+    const fromUrl = pgPassword(cfg);
+    if (fromUrl) next.password = fromUrl;
+  }
+  return next;
+}
 
 export type SanitizedConnection = ConnectionConfig & { hasConnectionUrl?: boolean };
 
@@ -55,7 +94,7 @@ export function mergeConnectionUpdate(
 }
 
 export function normalizeConnection(cfg: ConnectionConfig): ConnectionConfig {
-  const next = { ...cfg };
+  let next = hydratePgFromUrl({ ...cfg });
   if (next.engine === "sqlite" && (next.database?.trim() || next.host?.trim())) {
     const raw = next.database?.trim() || next.host?.trim() || "";
     next.database = resolveSqlitePath(raw);

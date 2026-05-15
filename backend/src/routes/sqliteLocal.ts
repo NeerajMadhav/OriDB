@@ -16,34 +16,54 @@ import {
 } from "../util/connectionMerge.js";
 import {
   isSqliteFilePath,
+  normalizePathInput,
   resolveSqlitePath,
   sqliteDatabasesDir,
+  sqlitePathsEqual,
   suggestSqliteName,
 } from "../util/sqlitePath.js";
 import { createSqliteDriver } from "../drivers/sqlite.js";
 import type { ConnectionConfig } from "../types/connection.js";
 import { connectHandle } from "../registry/connectionRegistry.js";
 
-ensureDir(sqliteDatabasesDir());
+function parseFormBool(v: unknown): boolean | undefined {
+  if (v === undefined || v === null || v === "") return undefined;
+  if (typeof v === "boolean") return v;
+  const s = String(v).toLowerCase();
+  if (s === "true" || s === "1" || s === "on") return true;
+  if (s === "false" || s === "0" || s === "off") return false;
+  return undefined;
+}
+
 const upload = multer({
-  dest: sqliteDatabasesDir(),
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      try {
+        const dir = sqliteDatabasesDir();
+        ensureDir(dir);
+        cb(null, dir);
+      } catch (e) {
+        cb(e as Error, "");
+      }
+    },
+    filename: (_req, _file, cb) => {
+      cb(null, `${randomUUID()}-upload.tmp`);
+    },
+  }),
   limits: { fileSize: 2 * 1024 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    if (isSqliteFilePath(file.originalname)) {
-      cb(null, true);
-    } else {
-      cb(new Error("File must be .db, .sqlite, or .sqlite3"));
-    }
-  },
 });
 
 export const sqliteLocalRouter = Router();
 
 function findByResolvedPath(resolved: string): ConnectionConfig | undefined {
+  const target = path.normalize(resolved);
   return loadConnections().find(
     (c) =>
       c.engine === "sqlite" &&
-      resolveSqlitePath(c.database ?? c.host ?? "") === resolved,
+      sqlitePathsEqual(
+        resolveSqlitePath(c.database ?? c.host ?? ""),
+        target,
+      ),
   );
 }
 
@@ -99,7 +119,14 @@ function upsertSqliteProfile(opts: {
 sqliteLocalRouter.post("/verify-path", (req, res, next) => {
   try {
     const { path: raw } = z.object({ path: z.string().min(1) }).parse(req.body);
-    const resolved = resolveSqlitePath(raw);
+    if (/fakepath/i.test(raw)) {
+      throw new HttpError(
+        400,
+        "Browser file picker paths cannot be opened by path. Use Upload instead.",
+        "FAKE_PATH",
+      );
+    }
+    const resolved = resolveSqlitePath(normalizePathInput(raw));
     const exists = fs.existsSync(resolved);
     let stat: { size: number; mtime: string } | null = null;
     let isFile = false;
@@ -131,7 +158,15 @@ sqliteLocalRouter.post("/open-path", async (req, res, next) => {
       })
       .parse(req.body);
 
-    const resolved = resolveSqlitePath(body.path);
+    const rawPath = normalizePathInput(body.path);
+    if (/fakepath/i.test(rawPath)) {
+      throw new HttpError(
+        400,
+        "Browser file picker paths cannot be opened by path. Use Upload instead.",
+        "FAKE_PATH",
+      );
+    }
+    const resolved = resolveSqlitePath(rawPath);
     if (!fs.existsSync(resolved)) {
       throw new HttpError(404, `File not found: ${resolved}`, "NOT_FOUND");
     }
@@ -141,7 +176,7 @@ sqliteLocalRouter.post("/open-path", async (req, res, next) => {
     if (!isSqliteFilePath(resolved)) {
       throw new HttpError(
         400,
-        "File must end with .db, .sqlite, or .sqlite3",
+        "File must end with .db, .sqlite, .sqlite3, or .db3",
         "BAD_EXT",
       );
     }
@@ -178,19 +213,21 @@ sqliteLocalRouter.post(
       if (!req.file) {
         throw new HttpError(400, "No file uploaded", "NO_FILE");
       }
-      const body = z
-        .object({
-          name: z.string().optional(),
-          readOnly: z.coerce.boolean().optional(),
-          connect: z.coerce.boolean().optional(),
-          keepOriginalName: z.coerce.boolean().optional(),
-        })
-        .parse(req.body);
+      const body = {
+        name: typeof req.body?.name === "string" ? req.body.name : undefined,
+        readOnly: parseFormBool(req.body?.readOnly),
+        connect: parseFormBool(req.body?.connect),
+        keepOriginalName: parseFormBool(req.body?.keepOriginalName),
+      };
 
-      const ext = path.extname(req.file.originalname) || ".db";
+      const original = req.file.originalname || "database.db";
+      let ext = path.extname(original);
+      if (!ext || !isSqliteFilePath(original)) {
+        ext = ".db";
+      }
       const safeBase =
         path
-          .basename(req.file.originalname, ext)
+          .basename(original, path.extname(original) || ext)
           .replace(/[^\w.-]+/g, "_")
           .slice(0, 60) || "database";
       const finalName = body.keepOriginalName
@@ -223,6 +260,7 @@ sqliteLocalRouter.post(
         connected,
         resolvedPath: resolved,
         storedIn: sqliteDatabasesDir(),
+        fileName: finalName,
       });
     } catch (e) {
       if (req.file?.path && fs.existsSync(req.file.path)) {
@@ -239,6 +277,7 @@ sqliteLocalRouter.post(
 
 sqliteLocalRouter.get("/library", (_req, res) => {
   const dir = sqliteDatabasesDir();
+  ensureDir(dir);
   if (!fs.existsSync(dir)) {
     res.json({ directory: dir, files: [] });
     return;

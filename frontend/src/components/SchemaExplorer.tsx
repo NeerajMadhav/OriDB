@@ -190,6 +190,15 @@ export function SchemaExplorer({
             title={`Open ${t.name}`}
             className="oridb-table-row"
             onClick={() => onSelectTable?.(t.name, schema)}
+            onDoubleClick={() => {
+              const q =
+                engine === "sqlite"
+                  ? `SELECT * FROM "${t.name.replace(/"/g, '""')}"\nLIMIT 10;`
+                  : `SELECT * FROM "${schema.replace(/"/g, '""')}"."${t.name.replace(/"/g, '""')}"\nLIMIT 10;`;
+              window.dispatchEvent(
+                new CustomEvent("oridb-insert-query", { detail: { sql: q } }),
+              );
+            }}
           >
             {t.type === "view" ? (
               <Eye className="text-text-muted h-3.5 w-3.5 shrink-0" />

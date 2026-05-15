@@ -44,8 +44,24 @@ const SSL_MODES_REQUIRE = new Set([
   "prefer",
 ]);
 
-export function parseConnectionUrl(raw: string): ParsedUrl | null {
+/**
+ * SQLAlchemy / driver URLs use scheme+driver (e.g. postgresql+psycopg2://).
+ * Strip the +driver suffix so URL parsing and node drivers get a canonical scheme.
+ */
+export function normalizeDriverConnectionUrl(raw: string): string {
   const trimmed = raw.trim();
+  const m = trimmed.match(/^([a-z][a-z0-9+.-]*):\/\//i);
+  if (!m) return trimmed;
+  const scheme = m[1]!.toLowerCase();
+  const plus = scheme.indexOf("+");
+  if (plus === -1) return trimmed;
+  let base = scheme.slice(0, plus);
+  if (base === "postgres") base = "postgresql";
+  return trimmed.replace(/^[a-z][a-z0-9+.-]*:\/\//i, `${base}://`);
+}
+
+export function parseConnectionUrl(raw: string): ParsedUrl | null {
+  const trimmed = normalizeDriverConnectionUrl(raw.trim());
   if (!trimmed) return null;
 
   const bareSqlite = parseBareSqlitePath(trimmed);
@@ -70,7 +86,7 @@ export function parseConnectionUrl(raw: string): ParsedUrl | null {
     return null;
   }
 
-  const protocol = url.protocol.replace(":", "").toLowerCase();
+  const protocol = url.protocol.replace(":", "").toLowerCase().split("+")[0]!;
 
   if (protocol === "postgres" || protocol === "postgresql") {
     return parsePostgresUrl(url, trimmed);
@@ -125,15 +141,25 @@ export function parseConnectionUrl(raw: string): ParsedUrl | null {
 
 /** Strip params that break node-pg while keeping sslmode. */
 export function sanitizePgConnectionString(raw: string): string {
-  let s = raw.trim();
+  let s = normalizeDriverConnectionUrl(raw);
   if (!s) return s;
   try {
     const u = new URL(s);
     if (u.protocol === "postgres:") {
       u.protocol = "postgresql:";
     }
+    if (u.protocol.includes("+")) {
+      u.protocol = "postgresql:";
+    }
     u.searchParams.delete("channel_binding");
-    if (!u.searchParams.has("sslmode") && inferSslFromHostname(u.hostname)) {
+    const host = u.hostname;
+    const isLocal =
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "::1";
+    if (isLocal && !u.searchParams.has("sslmode")) {
+      u.searchParams.set("sslmode", "disable");
+    } else if (!u.searchParams.has("sslmode") && inferSslFromHostname(host)) {
       u.searchParams.set("sslmode", "require");
     }
     return u.toString();

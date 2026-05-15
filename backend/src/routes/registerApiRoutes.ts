@@ -25,6 +25,14 @@ const apiLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+const authLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: { code: "RATE_LIMIT", message: "Too many auth attempts" } },
+});
+
 export function registerApiRoutes(app: Express): void {
   const api = Router();
   api.use(apiLimiter);
@@ -38,7 +46,7 @@ export function registerApiRoutes(app: Express): void {
   api.use("/", importExportRouter);
   api.use("/monitor", monitorRouter);
   api.use("/system", systemRouter);
-  api.use("/auth", authRouter);
+  api.use("/auth", authLimiter, authRouter);
   api.use("/users", usersRouter);
   api.use("/nosql", nosqlRouter);
   api.get("/audit-log", (req, res) => {

@@ -133,6 +133,48 @@ describe.runIf(sqliteAvailable)("OriDB E2E (SQLite)", () => {
     expect(res.body.history.length).toBeGreaterThan(0);
   });
 
+  it("POST /api/connections/sqlite/verify-path resolves quoted Windows-style path", async () => {
+    const quoted = process.platform === "win32" ? `"${tmpDb}"` : tmpDb;
+    const res = await request(app)
+      .post("/api/connections/sqlite/verify-path")
+      .send({ path: quoted });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.resolvedPath).toBe(path.normalize(tmpDb));
+  });
+
+  it("POST /api/connections/sqlite/upload copies and connects", async () => {
+    await request(app).post(`/api/connections/${connId}/disconnect`);
+    const uploadSrc = path.join(os.tmpdir(), `oridb-e2e-upload-${Date.now()}.db`);
+    const Database = require("better-sqlite3") as new (path: string) => {
+      exec: (sql: string) => void;
+      close: () => void;
+    };
+    const seed = new Database(uploadSrc);
+    seed.exec("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT)");
+    seed.close();
+
+    const res = await request(app)
+      .post("/api/connections/sqlite/upload")
+      .field("name", "Upload E2E")
+      .field("connect", "true")
+      .field("readOnly", "false")
+      .attach("file", uploadSrc);
+    try {
+      fs.unlinkSync(uploadSrc);
+    } catch {
+      /* ignore */
+    }
+    if (![200, 201].includes(res.status)) {
+      throw new Error(`upload failed ${res.status}: ${JSON.stringify(res.body)}`);
+    }
+    expect(res.body.connection.engine).toBe("sqlite");
+    expect(res.body.connected).toBe(true);
+    expect(res.body.resolvedPath).toMatch(/\.db$/i);
+    const lib = await request(app).get("/api/connections/sqlite/library");
+    expect(lib.body.files.length).toBeGreaterThanOrEqual(1);
+  });
+
   it("POST /api/connections/sqlite/open-path opens existing file", async () => {
     const res = await request(app)
       .post("/api/connections/sqlite/open-path")

@@ -6,5 +6,7 @@ dist
 .DS_Store
 coverage
 frontend/dist
+frontend/src/**/*.js
+!frontend/eslint.config.js
 backend/dist
 .playwright

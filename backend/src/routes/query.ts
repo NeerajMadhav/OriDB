@@ -57,7 +57,6 @@ queryRouter.post("/", async (req, res, next) => {
 
     const queryId = randomUUID();
     cancelMap.set(queryId, { cancel: () => h.sql?.cancel?.() ?? Promise.resolve() });
-    cancelMap.set(body.connectionId, cancelMap.get(queryId)!);
 
     const started = Date.now();
     const statements = splitSqlStatements(body.sql);
@@ -106,7 +105,6 @@ queryRouter.post("/", async (req, res, next) => {
       });
       throw e;
     } finally {
-      cancelMap.delete(body.connectionId);
       cancelMap.delete(queryId);
     }
   } catch (e) {

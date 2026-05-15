@@ -4,7 +4,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import { ExportDataMenu } from "./ExportDataMenu";
-import { VirtualDataGrid } from "./VirtualDataGrid";
+import { VirtualDataGrid, type GridCellSelection } from "./VirtualDataGrid";
+import { formatCellFull } from "../lib/cellValue";
+import { buildInspectorCellContext } from "../lib/inspector";
 import { defaultExportBasename } from "../lib/exportData";
 import { apiUrl } from "../api/client";
 import { useUiStore } from "../stores/uiStore";
@@ -29,48 +31,78 @@ export function TableViewer({
   const [ddl, setDdl] = useState("");
   const [stats, setStats] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(true);
+  const [missingTable, setMissingTable] = useState(false);
   const [showInsert, setShowInsert] = useState(false);
   const [draft, setDraft] = useState<Record<string, string>>({});
+  const [editCell, setEditCell] = useState<GridCellSelection | null>(null);
+  const [editDraft, setEditDraft] = useState("");
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [data, cols, ddlRes, statsRes] = await Promise.all([
-        api<{ rows: Record<string, unknown>[]; columns: { name: string }[] }>(
-          `/rows/${connId}/${encodeURIComponent(table)}?schema=${encodeURIComponent(schema)}&limit=500`,
-        ),
-        api<{ columns: Col[] }>(
-          `/schema/${connId}/tables/${encodeURIComponent(table)}/columns?schema=${encodeURIComponent(schema)}`,
-        ),
-        api<{ ddl: string }>(
-          `/schema/${connId}/tables/${encodeURIComponent(table)}/ddl?schema=${encodeURIComponent(schema)}`,
-        ),
-        api<{ stats: Record<string, unknown> }>(
-          `/schema/${connId}/tables/${encodeURIComponent(table)}/stats?schema=${encodeURIComponent(schema)}`,
-        ),
-      ]);
-      setRows(data.rows);
-      setColumns(cols.columns);
-      setDdl(ddlRes.ddl);
-      setStats(statsRes.stats);
-      setInspector({ type: "table", table, stats: statsRes.stats });
-    } catch (e) {
-      pushToast({ type: "error", message: (e as Error).message });
-    } finally {
-      setLoading(false);
-    }
-  }, [connId, table, schema, pushToast, setInspector]);
+  const loadMeta = useCallback(async () => {
+    const [cols, statsRes] = await Promise.all([
+      api<{ columns: Col[] }>(
+        `/schema/${connId}/tables/${encodeURIComponent(table)}/columns?schema=${encodeURIComponent(schema)}`,
+      ),
+      api<{ stats: Record<string, unknown> }>(
+        `/schema/${connId}/tables/${encodeURIComponent(table)}/stats?schema=${encodeURIComponent(schema)}`,
+      ),
+    ]);
+    setColumns(cols.columns);
+    setStats(statsRes.stats);
+    setInspector({ type: "table", table, stats: statsRes.stats });
+  }, [connId, table, schema, setInspector]);
+
+  const loadRows = useCallback(async () => {
+    const data = await api<{ rows: Record<string, unknown>[] }>(
+      `/rows/${connId}/${encodeURIComponent(table)}?schema=${encodeURIComponent(schema)}&limit=500`,
+    );
+    setRows(data.rows);
+  }, [connId, table, schema]);
+
+  const loadDdl = useCallback(async () => {
+    const ddlRes = await api<{ ddl: string }>(
+      `/schema/${connId}/tables/${encodeURIComponent(table)}/ddl?schema=${encodeURIComponent(schema)}`,
+    );
+    setDdl(ddlRes.ddl);
+  }, [connId, table, schema]);
+
+  const refresh = useCallback(
+    async (which: "all" | "data" | "schema" | "ddl" = "all") => {
+      setLoading(true);
+      setMissingTable(false);
+      try {
+        if (which === "all" || which === "schema") await loadMeta();
+        if (which === "all" || which === "data") await loadRows();
+        if (which === "all" || which === "ddl") await loadDdl();
+      } catch (e) {
+        const msg = (e as Error).message;
+        if (/does not exist|not found/i.test(msg)) {
+          setMissingTable(true);
+        }
+        pushToast({ type: "error", message: msg });
+      } finally {
+        setLoading(false);
+      }
+    },
+    [loadMeta, loadRows, loadDdl, pushToast],
+  );
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    void refresh("all");
+  }, [connId, table, schema]);
+
+  useEffect(() => {
+    if (tab === "ddl" && !ddl) void refresh("ddl");
+    if (tab === "data" && rows.length === 0 && columns.length > 0) void loadRows();
+  }, [tab, ddl, rows.length, columns.length, refresh, loadRows]);
 
   const gridCols = useMemo(
     () =>
-      (rows[0] ? Object.keys(rows[0]) : columns.map((c) => c.name)).map((name) => ({
-        id: name,
-        header: name,
-      })),
+      (columns.length
+        ? columns.map((c) => c.name)
+        : rows[0]
+          ? Object.keys(rows[0])
+          : []
+      ).map((name) => ({ id: name, header: name })),
     [rows, columns],
   );
 
@@ -87,7 +119,43 @@ export function TableViewer({
       pushToast({ type: "success", message: "Row inserted" });
       setShowInsert(false);
       setDraft({});
-      await refresh();
+      await refresh("data");
+    } catch (e) {
+      pushToast({ type: "error", message: (e as Error).message });
+    }
+  };
+
+  const handleCellSelect = useCallback(
+    (sel: GridCellSelection) => {
+      setInspector(buildInspectorCellContext(sel, { table, schema }));
+    },
+    [table, schema, setInspector],
+  );
+
+  const saveCellEdit = async () => {
+    if (!editCell) return;
+    const pkCol = columns.find((c) => c.isPk)?.name ?? Object.keys(editCell.row)[0];
+    if (!pkCol || editCell.row[pkCol] == null) {
+      pushToast({ type: "error", message: "Cannot update row without a primary key" });
+      return;
+    }
+    const colMeta = columns.find((c) => c.name === editCell.columnId);
+    const parsed =
+      editDraft === "" && colMeta?.isNullable
+        ? null
+        : editDraft;
+    try {
+      await api(
+        `/rows/${connId}/${encodeURIComponent(table)}/${encodeURIComponent(String(editCell.row[pkCol]))}?schema=${encodeURIComponent(schema)}&pkColumn=${encodeURIComponent(pkCol)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ row: { [editCell.columnId]: parsed } }),
+        },
+      );
+      pushToast({ type: "success", message: "Cell updated" });
+      setEditCell(null);
+      setEditDraft("");
+      await refresh("data");
     } catch (e) {
       pushToast({ type: "error", message: (e as Error).message });
     }
@@ -95,15 +163,19 @@ export function TableViewer({
 
   const deleteSelected = async (row: Record<string, unknown>) => {
     const pk = columns.find((c) => c.isPk)?.name ?? Object.keys(row)[0];
-    if (!pk || row[pk] == null) return;
+    if (!pk || row[pk] == null) {
+      pushToast({ type: "error", message: "Cannot delete row without a primary key value" });
+      return;
+    }
     if (!confirm(`Delete row where ${pk} = ${String(row[pk])}?`)) return;
     try {
       await api(
         `/rows/${connId}/${encodeURIComponent(table)}?schema=${encodeURIComponent(schema)}&where=${encodeURIComponent(`${pk} = '${String(row[pk]).replaceAll("'", "''")}'`)}`,
         { method: "DELETE" },
       );
+      const pkVal = row[pk];
+      setRows((prev) => prev.filter((r) => r[pk] !== pkVal));
       pushToast({ type: "success", message: "Row deleted" });
-      await refresh();
     } catch (e) {
       pushToast({ type: "error", message: (e as Error).message });
     }
@@ -113,6 +185,21 @@ export function TableViewer({
     return (
       <div className="text-text-muted animate-pulse p-4 text-sm">
         Loading table…
+      </div>
+    );
+  }
+
+  if (missingTable) {
+    return (
+      <div className="border-error/30 bg-error/5 text-text-primary m-4 rounded-lg border p-4 text-sm">
+        <p className="font-medium">Table not found</p>
+        <p className="text-text-muted mt-1">
+          <code className="text-text-secondary">
+            {schema}.{table}
+          </code>{" "}
+          does not exist on this database. Close this tab or pick another table from the
+          schema sidebar.
+        </p>
       </div>
     );
   }
@@ -131,7 +218,7 @@ export function TableViewer({
             type="button"
             title="Refresh"
             className="border-border rounded border px-2 py-0.5 text-xs"
-            onClick={() => void refresh()}
+            onClick={() => void refresh("all")}
           >
             Refresh
           </button>
@@ -180,7 +267,13 @@ export function TableViewer({
           <VirtualDataGrid
             columns={gridCols}
             rows={rows}
+            editable
+            onCellSelect={handleCellSelect}
             onRowDelete={(row) => void deleteSelected(row)}
+            onCellEdit={(sel) => {
+              setEditCell(sel);
+              setEditDraft(formatCellFull(sel.value));
+            }}
           />
         )}
         {tab === "schema" && (
@@ -211,6 +304,44 @@ export function TableViewer({
           </pre>
         )}
       </div>
+      {editCell && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="bg-surface-elevated border-border w-full max-w-lg rounded-lg border p-4 shadow-lg">
+            <h3 className="text-text-primary mb-1 font-semibold">Edit cell</h3>
+            <p className="text-text-muted mb-3 font-mono text-xs">
+              {editCell.columnId} (row {editCell.rowIndex + 1})
+            </p>
+            <textarea
+              className="border-border bg-bg text-text-primary oridb-scrollbar max-h-48 min-h-[80px] w-full rounded border p-2 font-mono text-xs"
+              value={editDraft}
+              onChange={(e) => setEditDraft(e.target.value)}
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                className="border-border rounded border px-3 py-1 text-sm"
+                onClick={() => {
+                  setEditCell(null);
+                  setEditDraft("");
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="bg-primary rounded px-3 py-1 text-sm text-white"
+                onClick={() => void saveCellEdit()}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {showInsert && (
         <div
           className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4"

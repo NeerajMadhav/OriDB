@@ -43,6 +43,41 @@ describe("parseConnectionUrl", () => {
     expect(p?.database).toBe("production");
   });
 
+  it("parses SQLAlchemy postgresql+psycopg2 URL (RDS)", () => {
+    const p = parseConnectionUrl(
+      "postgresql+psycopg2://codepui_admin:secret@codepui.c0fs68mkarob.us-east-1.rds.amazonaws.com:5432/codepui",
+    );
+    expect(p?.engine).toBe("postgresql");
+    expect(p?.provider).toBe("aws-rds");
+    expect(p?.host).toBe("codepui.c0fs68mkarob.us-east-1.rds.amazonaws.com");
+    expect(p?.port).toBe(5432);
+    expect(p?.database).toBe("codepui");
+    expect(p?.username).toBe("codepui_admin");
+    expect(p?.password).toBe("secret");
+    expect(p?.ssl).toBe(true);
+    expect(p?.connectionUrl).toMatch(/^postgresql:\/\//);
+    expect(p?.connectionUrl).not.toContain("psycopg2");
+    expect(p?.suggestedName).toContain("codepui");
+  });
+
+  it("parses password containing equals sign", () => {
+    const p = parseConnectionUrl(
+      "postgresql+psycopg2://codepui_admin:-PGF=UUrjG6So_5GLxW1@codepui.c0fs68mkarob.us-east-1.rds.amazonaws.com:5432/codepui",
+    );
+    expect(p?.username).toBe("codepui_admin");
+    expect(p?.password).toBe("-PGF=UUrjG6So_5GLxW1");
+    expect(p?.database).toBe("codepui");
+  });
+
+  it("parses mysql+pymysql driver URL", () => {
+    const p = parseConnectionUrl(
+      "mysql+pymysql://root:pass@127.0.0.1:3306/app",
+    );
+    expect(p?.engine).toBe("mysql");
+    expect(p?.host).toBe("127.0.0.1");
+    expect(p?.connectionUrl).toMatch(/^mysql:\/\//);
+  });
+
   it("parses Supabase pooler URL", () => {
     const p = parseConnectionUrl(
       "postgresql://postgres.xyz:pass@aws-0-us-east-1.pooler.supabase.com:6543/postgres",

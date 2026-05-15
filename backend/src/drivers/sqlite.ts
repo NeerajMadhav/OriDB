@@ -2,6 +2,7 @@
  * SQLite driver using better-sqlite3 when available.
  */
 import type { ConnectionConfig } from "../types/connection.js";
+import { resolveSqlitePath } from "../util/sqlitePath.js";
 import type { QueryColumn, SqlDriver } from "./sqlTypes.js";
 
 type BetterDb = {
@@ -26,8 +27,9 @@ export function createSqliteDriver(cfg: ConnectionConfig): SqlDriver {
 
   let db: BetterDb | null = null;
 
-  const path = cfg.database ?? cfg.host;
-  if (!path) throw new Error("SQLite requires database file path");
+  const rawPath = cfg.database ?? cfg.host;
+  if (!rawPath?.trim()) throw new Error("SQLite requires database file path");
+  const dbPath = resolveSqlitePath(rawPath);
 
   return {
     engine: "sqlite",
@@ -36,7 +38,7 @@ export function createSqliteDriver(cfg: ConnectionConfig): SqlDriver {
       const start = Date.now();
       try {
         const Database = (await loadBetterSqlite()).default;
-        const t = new Database(path, { readonly: true });
+        const t = new Database(dbPath, { readonly: true });
         t.prepare("SELECT 1").all();
         t.close();
         return { ok: true, latencyMs: Date.now() - start };
@@ -52,7 +54,7 @@ export function createSqliteDriver(cfg: ConnectionConfig): SqlDriver {
     async connect() {
       const Database = (await loadBetterSqlite()).default;
       const readOnly = cfg.readOnly === true;
-      db = new Database(path, { readonly: readOnly }) as unknown as BetterDb;
+      db = new Database(dbPath, { readonly: readOnly }) as unknown as BetterDb;
     },
 
     async disconnect() {
