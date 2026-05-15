@@ -1,0 +1,57 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "bcryptjs": "^3.0.2",
+    "compression": "^1.8.0",
+    "cors": "^2.8.5",
+    "csv-parser": "^3.2.0",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "express-rate-limit": "^7.5.0",
+    "generic-pool": "^3.9.0",
+    "ioredis": "^5.6.1",
+    "jsonwebtoken": "^9.0.2",
+    "mongodb": "^6.16.0",
+    "multer": "^1.4.5-lts.2",
+    "mysql2": "^3.14.0",
+    "node-sql-parser": "^5.3.8",
+    "p-queue": "^8.1.0",
+    "pg": "^8.15.6",
+    "sql-formatter": "^15.6.6",
+    "stream-json": "^1.9.1",
+    "uuid": "^11.1.0",
+    "ws": "^8.18.2",
+    "zod": "^3.25.28"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.10.0"
+  },
+  "devDependencies": {
+    "@types/archiver": "^6.0.3",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/compression": "^1.7.5",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.1",
+    "@types/jsonwebtoken": "^9.0.9",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.15.21",
+    "@types/pg": "^8.15.4",
+    "@types/supertest": "^6.0.3",
+    "@types/ws": "^8.18.1",
+    "supertest": "^7.1.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.4"
+  }
+}
