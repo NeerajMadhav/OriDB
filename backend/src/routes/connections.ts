@@ -12,10 +12,17 @@ import {
 import { loadConnections, saveConnections } from "../store/connectionsStore.js";
 import { parseConnectionUrl } from "../util/parseConnectionUrl.js";
 import {
+  mergeConnectionUpdate,
+  normalizeConnection,
+  sanitizeForApi,
+  stripPlaceholderSecrets,
+} from "../util/connectionMerge.js";
+import {
   connectHandle,
   disconnectHandle,
   isConnected,
 } from "../registry/connectionRegistry.js";
+import { sqliteLocalRouter } from "./sqliteLocal.js";
 import { createPostgresDriver } from "../drivers/postgres.js";
 import { createSqliteDriver } from "../drivers/sqlite.js";
 import { createMysqlDriver } from "../drivers/mysql.js";
@@ -31,9 +38,11 @@ const updateBody = connectionConfigSchema.omit({ id: true }).partial();
 export const connectionsRouter = Router();
 
 connectionsRouter.get("/", (_req, res) => {
-  const list = loadConnections().map(sanitize);
+  const list = loadConnections().map(sanitizeForApi);
   res.json({ connections: list });
 });
+
+connectionsRouter.use("/sqlite", sqliteLocalRouter);
 
 connectionsRouter.post("/parse-url", (req, res) => {
   const url = z.string().min(1).parse(req.body?.url);
@@ -45,33 +54,25 @@ connectionsRouter.post("/parse-url", (req, res) => {
   res.json({ parsed });
 });
 
-function stripPlaceholderSecrets(
-  body: Partial<ConnectionConfig>,
-): Partial<ConnectionConfig> {
-  const next = { ...body };
-  if (next.password === "********") delete next.password;
-  return next;
-}
-
 connectionsRouter.post("/", (req, res, next) => {
   try {
     const body = createBody.parse(stripPlaceholderSecrets(req.body));
     const id = body.id ?? randomUUID();
-    const merged: ConnectionConfig = {
+    const merged = normalizeConnection({
       ...body,
       id,
       port: body.port ?? defaultPortForEngine(body.engine),
-    } as ConnectionConfig;
+    } as ConnectionConfig);
     const list = loadConnections().filter((c) => c.id !== id);
     list.push(merged);
     saveConnections(list);
-    res.status(201).json({ connection: sanitize(merged) });
+    res.status(201).json({ connection: sanitizeForApi(merged) });
   } catch (e) {
     next(e);
   }
 });
 
-connectionsRouter.put("/:id", (req, res, next) => {
+connectionsRouter.put("/:id", async (req, res, next) => {
   try {
     const id = req.params.id;
     const body = updateBody.parse(stripPlaceholderSecrets(req.body));
@@ -81,10 +82,13 @@ connectionsRouter.put("/:id", (req, res, next) => {
       res.status(404).json({ error: { code: "NOT_FOUND", message: "Connection" } });
       return;
     }
-    const merged = { ...list[idx], ...body, id } as ConnectionConfig;
+    const merged = mergeConnectionUpdate(list[idx]!, body);
     list[idx] = merged;
     saveConnections(list);
-    res.json({ connection: sanitize(merged) });
+    if (isConnected(id)) {
+      await disconnectHandle(id);
+    }
+    res.json({ connection: sanitizeForApi(merged) });
   } catch (e) {
     next(e);
   }
@@ -98,11 +102,41 @@ connectionsRouter.delete("/:id", async (req, res) => {
   res.status(204).end();
 });
 
-connectionsRouter.post("/test", async (req, res) => {
-  const cfg = createBody.parse(req.body) as ConnectionConfig;
-  const testCfg = { ...cfg, id: cfg.id ?? randomUUID() };
-  const r = await testConnection(testCfg);
-  res.json(r);
+connectionsRouter.post("/test", async (req, res, next) => {
+  try {
+    const body = stripPlaceholderSecrets(req.body ?? {});
+    const id = typeof body.id === "string" ? body.id : undefined;
+    let testCfg: ConnectionConfig;
+    if (id) {
+      const stored = loadConnections().find((c) => c.id === id);
+      if (!stored) {
+        res.status(404).json({ error: { code: "NOT_FOUND", message: "Connection" } });
+        return;
+      }
+      const patch = updateBody.parse(body);
+      testCfg = mergeConnectionUpdate(stored, patch);
+    } else {
+      const cfg = createBody.parse(body) as ConnectionConfig;
+      testCfg = normalizeConnection({
+        ...cfg,
+        id: cfg.id ?? randomUUID(),
+        port: cfg.port ?? defaultPortForEngine(cfg.engine),
+      });
+    }
+    const r = await testConnection(testCfg);
+    res.json(r);
+  } catch (e) {
+    next(e);
+  }
+});
+
+connectionsRouter.get("/:id", (req, res) => {
+  const c = loadConnections().find((x) => x.id === req.params.id);
+  if (!c) {
+    res.status(404).json({ error: { code: "NOT_FOUND", message: "Connection" } });
+    return;
+  }
+  res.json({ connection: sanitizeForApi(c) });
 });
 
 connectionsRouter.post("/:id/connect", async (req, res) => {
@@ -127,10 +161,6 @@ connectionsRouter.get("/:id/status", (req, res) => {
   res.json({ connected: isConnected(id) });
 });
 
-function sanitize(c: ConnectionConfig): ConnectionConfig {
-  return { ...c, password: c.password ? "********" : undefined };
-}
-
 async function testConnection(cfg: ConnectionConfig): Promise<{
   ok: boolean;
   latencyMs: number;
@@ -154,6 +184,17 @@ async function testConnection(cfg: ConnectionConfig): Promise<{
     }
     if (cfg.engine === "sqlite") {
       return await createSqliteDriver(cfg).test();
+    }
+    if (cfg.engine === "snowflake") {
+      const { createSnowflakeDriver } = await import("../drivers/snowflake.js");
+      return await createSnowflakeDriver(cfg).test();
+    }
+    if (cfg.engine === "clickhouse" || cfg.engine === "sqlserver") {
+      return {
+        ok: false,
+        latencyMs: 0,
+        error: `${cfg.engine} connections can be saved but querying is not enabled yet in this build`,
+      };
     }
     if (cfg.engine === "mongodb") {
       const d = createMongoDriver(cfg);

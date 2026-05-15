@@ -11,7 +11,8 @@ import archiver from "archiver";
 import { ensureDir, getOriDbHome } from "../paths/oridbHome.js";
 import { getHandle } from "../registry/connectionRegistry.js";
 import { getConnectionOr404 } from "../routes/connections.js";
-import { dialectOf } from "./schemaService.js";
+import { dialectOf, isPgLike } from "./schemaService.js";
+import { rowsToCsv } from "../util/exportCsv.js";
 import { broadcast } from "../ws/multiplex.js";
 
 export type JobState = {
@@ -97,7 +98,7 @@ export function startImportJob(opts: {
       const fq =
         dialect === "sqlite"
           ? `"${opts.table.replaceAll('"', '""')}"`
-          : dialect === "pg"
+          : isPgLike(dialect)
             ? `"${schema.replaceAll('"', '""')}"."${opts.table.replaceAll('"', '""')}"`
             : `\`${opts.table.replaceAll("`", "``")}\``;
       let inserted = 0;
@@ -110,7 +111,7 @@ export function startImportJob(opts: {
         const cols = Object.keys(row as Record<string, unknown>);
         if (!cols.length) continue;
         const placeholders =
-          dialect === "pg"
+          dialect === "pg" || dialect === "snowflake"
             ? cols.map((_, i) => `$${i + 1}`).join(", ")
             : cols.map(() => "?").join(", ");
         const qCols = cols
@@ -158,7 +159,7 @@ export function startExportJob(opts: {
   connectionId: string;
   tables: string[];
   schema?: string;
-  format?: "sql" | "csv";
+  format?: "csv" | "jsonl";
 }): string {
   const jobId = randomUUID();
   const outPath = path.join(jobsDir(), `${jobId}.zip`);
@@ -191,12 +192,17 @@ export function startExportJob(opts: {
         const fq =
           dialect === "sqlite"
             ? `"${table.replaceAll('"', '""')}"`
-            : dialect === "pg"
+            : isPgLike(dialect)
               ? `"${schema.replaceAll('"', '""')}"."${table.replaceAll('"', '""')}"`
               : `\`${table.replaceAll("`", "``")}\``;
         const r = await h.sql!.query(`SELECT * FROM ${fq}`);
-        const lines = r.rows.map((row) => JSON.stringify(row)).join("\n");
-        archive.append(lines, { name: `${table}.jsonl` });
+        if (opts.format === "csv") {
+          const csv = rowsToCsv(r.columns, r.rows);
+          archive.append(csv, { name: `${table}.csv` });
+        } else {
+          const lines = r.rows.map((row) => JSON.stringify(row)).join("\n");
+          archive.append(lines, { name: `${table}.jsonl` });
+        }
         i++;
         job.processed = i;
         job.progress = Math.round((i / opts.tables.length) * 100);

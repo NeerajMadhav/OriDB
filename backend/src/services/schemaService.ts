@@ -18,13 +18,22 @@ export type ColumnInfo = {
   isPk: boolean;
 };
 
-function ph(dialect: "pg" | "mysql", n: number): string {
-  return dialect === "pg" ? `$${n}` : "?";
+/** SQL engines supported by schema introspection (excludes sqlite). */
+export type PgMysqlDialect = "pg" | "mysql" | "snowflake";
+
+export type SqlDialect = PgMysqlDialect | "sqlite";
+
+function ph(dialect: PgMysqlDialect, n: number): string {
+  return dialect === "mysql" ? "?" : `$${n}`;
+}
+
+export function isPgLike(dialect: PgMysqlDialect): boolean {
+  return dialect === "pg" || dialect === "snowflake";
 }
 
 export async function listDatabases(
   driver: SqlDriver,
-  dialect: "pg" | "mysql",
+  dialect: PgMysqlDialect,
 ): Promise<string[]> {
   if (dialect === "pg") {
     const r = await driver.query(
@@ -43,7 +52,7 @@ export async function listDatabases(
 
 export async function listSchemas(
   driver: SqlDriver,
-  dialect: "pg" | "mysql",
+  dialect: PgMysqlDialect,
 ): Promise<string[]> {
   if (dialect === "pg") {
     const r = await driver.query(
@@ -63,7 +72,7 @@ export async function listSchemas(
 
 export async function listTables(
   driver: SqlDriver,
-  dialect: "pg" | "mysql",
+  dialect: PgMysqlDialect,
   schema: string,
 ): Promise<TableSummary[]> {
   const p = ph(dialect, 1);
@@ -83,10 +92,29 @@ export async function listTables(
 
 export async function listColumns(
   driver: SqlDriver,
-  dialect: "pg" | "mysql",
+  dialect: PgMysqlDialect,
   schema: string,
   table: string,
 ): Promise<ColumnInfo[]> {
+  if (dialect === "snowflake") {
+    const sch = schema.replace(/"/g, '""');
+    const tbl = table.replace(/"/g, '""');
+    const r = await driver.query(`DESCRIBE TABLE "${sch}"."${tbl}"`);
+    return r.rows.map((row) => {
+      const rec = row as Record<string, unknown>;
+      const pk = String(rec["primary key"] ?? rec.primary_key ?? rec.key ?? "");
+      return {
+        name: String(rec.name ?? rec.NAME ?? ""),
+        dataType: String(rec.type ?? rec.TYPE ?? ""),
+        isNullable: String(rec["null?"] ?? rec.null ?? "Y").toUpperCase() === "Y",
+        columnDefault:
+          rec.default == null || rec.default === ""
+            ? null
+            : String(rec.default),
+        isPk: pk.toUpperCase() === "Y",
+      };
+    });
+  }
   const p1 = ph(dialect, 1);
   const p2 = ph(dialect, 2);
   const r = await driver.query(
@@ -118,12 +146,14 @@ export async function listColumns(
 
 export async function approximateTableDdl(
   driver: SqlDriver,
-  dialect: "pg" | "mysql",
+  dialect: PgMysqlDialect,
   schema: string,
   table: string,
 ): Promise<string> {
   const cols = await listColumns(driver, dialect, schema, table);
-  const q = dialect === "pg" ? (s: string) => `"${s.replaceAll('"', '""')}"` : (s: string) => `\`${s.replaceAll("`", "``")}\``;
+  const q = isPgLike(dialect)
+    ? (s: string) => `"${s.replaceAll('"', '""')}"`
+    : (s: string) => `\`${s.replaceAll("`", "``")}\``;
   const lines = cols.map((c) => {
     const nulls = c.isNullable ? "NULL" : "NOT NULL";
     const def =
@@ -133,7 +163,7 @@ export async function approximateTableDdl(
     const pk = c.isPk ? " PRIMARY KEY" : "";
     return `  ${q(c.name)} ${c.dataType} ${nulls}${def}${pk}`;
   });
-  if (dialect === "pg") {
+  if (isPgLike(dialect)) {
     return `CREATE TABLE ${q(schema)}.${q(table)} (\n${lines.join(",\n")}\n);`;
   }
   return `CREATE TABLE ${q(table)} (\n${lines.join(",\n")}\n);`;
@@ -141,11 +171,23 @@ export async function approximateTableDdl(
 
 export async function listIndexes(
   driver: SqlDriver,
-  dialect: "pg" | "mysql",
+  dialect: PgMysqlDialect,
   schema: string,
   table: string,
 ) {
-  if (dialect === "pg") {
+  if (isPgLike(dialect)) {
+    if (dialect === "snowflake") {
+      const sch = schema.replace(/"/g, '""');
+      const tbl = table.replace(/"/g, '""');
+      const r = await driver.query(`SHOW INDEXES IN TABLE "${sch}"."${tbl}"`);
+      return r.rows.map((x) => {
+        const row = x as Record<string, unknown>;
+        return {
+          name: String(row.name ?? row.column_name ?? ""),
+          definition: String(row.index_type ?? row.kind ?? ""),
+        };
+      });
+    }
     const r = await driver.query(
       `SELECT indexname AS n, indexdef AS def
        FROM pg_indexes
@@ -171,7 +213,7 @@ export async function listIndexes(
 
 export async function listConstraints(
   driver: SqlDriver,
-  dialect: "pg" | "mysql",
+  dialect: PgMysqlDialect,
   schema: string,
   table: string,
 ) {
@@ -188,7 +230,7 @@ export async function listConstraints(
 
 export async function erDiagram(
   driver: SqlDriver,
-  dialect: "pg" | "mysql",
+  dialect: PgMysqlDialect,
   schema: string,
 ) {
   const p = ph(dialect, 1);
@@ -256,7 +298,10 @@ export async function sqliteListColumns(
   }));
 }
 
-export function dialectOf(cfg: ConnectionConfig): "pg" | "mysql" | "sqlite" {
+export function dialectOf(
+  cfg: ConnectionConfig,
+): SqlDialect {
+  if (cfg.engine === "snowflake") return "snowflake";
   if (
     cfg.engine === "postgresql" ||
     cfg.engine === "cockroachdb" ||
@@ -273,13 +318,42 @@ export function dialectOf(cfg: ConnectionConfig): "pg" | "mysql" | "sqlite" {
   return "sqlite";
 }
 
+function snowflakeCell(row: Record<string, unknown>): string {
+  const v = row.name ?? row.NAME ?? row.schema_name ?? row.SCHEMA_NAME;
+  return String(v ?? Object.values(row)[0] ?? "");
+}
+
+export async function listSchemasSnowflake(
+  driver: SqlDriver,
+  database: string,
+): Promise<string[]> {
+  const db = database.replace(/"/g, '""');
+  const r = await driver.query(`SHOW SCHEMAS IN DATABASE "${db}"`);
+  return r.rows.map((row) => snowflakeCell(row as Record<string, unknown>)).filter(Boolean);
+}
+
+export async function listTablesSnowflake(
+  driver: SqlDriver,
+  database: string,
+  schema: string,
+): Promise<TableSummary[]> {
+  const db = database.replace(/"/g, '""');
+  const sch = schema.replace(/"/g, '""');
+  const r = await driver.query(`SHOW TABLES IN SCHEMA "${db}"."${sch}"`);
+  return r.rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    const name = String(rec.name ?? rec.NAME ?? rec.table_name ?? "");
+    return { schema, name, type: "table" as const };
+  });
+}
+
 function quoteSqliteIdent(name: string): string {
   return `"${name.replaceAll('"', '""')}"`;
 }
 
 export async function listViews(
   driver: SqlDriver,
-  dialect: "pg" | "mysql",
+  dialect: PgMysqlDialect,
   schema: string,
 ): Promise<{ name: string; definition?: string }[]> {
   const p = ph(dialect, 1);
@@ -292,7 +366,7 @@ export async function listViews(
 
 export async function listProcedures(
   driver: SqlDriver,
-  dialect: "pg" | "mysql",
+  dialect: PgMysqlDialect,
   schema: string,
 ) {
   if (dialect === "pg") {
@@ -323,7 +397,7 @@ export async function listProcedures(
 
 export async function listFunctions(
   driver: SqlDriver,
-  dialect: "pg" | "mysql",
+  dialect: PgMysqlDialect,
   schema: string,
 ) {
   if (dialect === "pg") {
@@ -358,12 +432,12 @@ export async function listFunctions(
 
 export async function listTriggers(
   driver: SqlDriver,
-  dialect: "pg" | "mysql",
+  dialect: PgMysqlDialect,
   schema: string,
 ) {
   const p1 = ph(dialect, 1);
   const r = await driver.query(
-    dialect === "pg"
+    isPgLike(dialect)
       ? `SELECT trigger_name AS n, event_manipulation AS ev, action_timing AS timing, event_object_table AS tbl
          FROM information_schema.triggers WHERE trigger_schema = ${p1} ORDER BY trigger_name`
       : `SELECT TRIGGER_NAME AS n, EVENT_MANIPULATION AS ev, ACTION_TIMING AS timing, EVENT_OBJECT_TABLE AS tbl
@@ -380,7 +454,7 @@ export async function listTriggers(
 
 export async function tableStats(
   driver: SqlDriver,
-  dialect: "pg" | "mysql" | "sqlite",
+  dialect: SqlDialect,
   schema: string,
   table: string,
 ) {
@@ -395,7 +469,20 @@ export async function tableStats(
       lastAnalyze: null,
     };
   }
-  if (dialect === "pg") {
+  if (isPgLike(dialect)) {
+    if (dialect === "snowflake") {
+      const sch = schema.replace(/"/g, '""');
+      const tbl = table.replace(/"/g, '""');
+      const r = await driver.query(
+        `SELECT COUNT(*) AS c FROM "${sch}"."${tbl}"`,
+      );
+      return {
+        rowCount: Number(r.rows[0]?.c ?? 0),
+        sizeBytes: null,
+        lastVacuum: null,
+        lastAnalyze: null,
+      };
+    }
     const p1 = ph(dialect, 1);
     const p2 = ph(dialect, 2);
     const est = await driver.query(
@@ -434,7 +521,7 @@ export async function tableStats(
 
 export async function columnStats(
   driver: SqlDriver,
-  dialect: "pg" | "mysql" | "sqlite",
+  dialect: SqlDialect,
   schema: string,
   table: string,
   column: string,
@@ -442,7 +529,7 @@ export async function columnStats(
   const q =
     dialect === "sqlite"
       ? quoteSqliteIdent(table)
-      : dialect === "pg"
+      : isPgLike(dialect)
         ? `"${schema.replaceAll('"', '""')}"."${table.replaceAll('"', '""')}"`
         : `\`${table.replaceAll("`", "``")}\``;
   const col =

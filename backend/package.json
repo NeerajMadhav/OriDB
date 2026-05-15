@@ -27,6 +27,7 @@
     "node-sql-parser": "^5.3.8",
     "p-queue": "^8.1.0",
     "pg": "^8.15.6",
+    "snowflake-sdk": "^2.4.1",
     "sql-formatter": "^15.6.6",
     "stream-json": "^1.9.1",
     "uuid": "^11.1.0",
@@ -38,8 +39,8 @@
   },
   "devDependencies": {
     "@types/archiver": "^6.0.3",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/bcryptjs": "^2.4.6",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/compression": "^1.7.5",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.1",

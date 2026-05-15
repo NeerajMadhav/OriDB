@@ -3,7 +3,10 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
+import { ExportDataMenu } from "./ExportDataMenu";
 import { VirtualDataGrid } from "./VirtualDataGrid";
+import { defaultExportBasename } from "../lib/exportData";
+import { apiUrl } from "../api/client";
 import { useUiStore } from "../stores/uiStore";
 import { useWorkspaceStore } from "../stores/workspaceStore";
 
@@ -143,6 +146,21 @@ export function TableViewer({
           >
             Add row
           </button>
+          <ExportDataMenu
+            columns={columns.map((c) => ({ name: c.name }))}
+            rows={rows}
+            basename={defaultExportBasename(table)}
+          />
+          <a
+            className="border-border text-text-secondary hover:text-primary rounded border px-2 py-0.5 text-xs"
+            href={apiUrl(
+              `/rows/${connId}/${encodeURIComponent(table)}?schema=${encodeURIComponent(schema)}&format=csv&limit=100000`,
+            )}
+            download={`${table}.csv`}
+            title="Download full table as CSV (up to 100k rows)"
+          >
+            Full CSV
+          </a>
         </div>
       </div>
       <div className="border-border flex gap-1 border-b px-2 py-1 text-xs">

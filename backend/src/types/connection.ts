@@ -11,6 +11,9 @@ export const engineSchema = z.enum([
   "planetscale",
   "neon",
   "supabase",
+  "snowflake",
+  "clickhouse",
+  "sqlserver",
 ]);
 
 export type Engine = z.infer<typeof engineSchema>;
@@ -39,6 +42,9 @@ export const connectionConfigSchema = z.object({
   queryTimeoutSec: z.number().min(1).max(3600).optional(),
   poolMin: z.number().int().min(0).max(50).optional(),
   poolMax: z.number().int().min(1).max(100).optional(),
+  warehouse: z.string().optional(),
+  role: z.string().optional(),
+  defaultSchema: z.string().optional(),
 });
 
 export type ConnectionConfig = z.infer<typeof connectionConfigSchema>;
@@ -60,6 +66,12 @@ export function defaultPortForEngine(engine: Engine): number {
       return 6379;
     case "sqlite":
       return 0;
+    case "snowflake":
+      return 443;
+    case "clickhouse":
+      return 8123;
+    case "sqlserver":
+      return 1433;
     default: {
       const _exhaustive: never = engine;
       return _exhaustive;

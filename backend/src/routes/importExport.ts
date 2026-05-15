@@ -75,12 +75,14 @@ importExportRouter.post("/export", (req, res) => {
         connectionId: z.string().uuid(),
         tables: z.array(z.string().min(1)).min(1),
         schema: z.string().optional(),
+        format: z.enum(["csv", "jsonl"]).optional(),
       })
       .parse(req.body);
     const jobId = startExportJob({
       connectionId: body.connectionId,
       tables: body.tables,
       schema: body.schema,
+      format: body.format,
     });
     res.status(202).json({ jobId });
   } catch (e) {

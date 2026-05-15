@@ -9,7 +9,12 @@ import { ensureDir, getOriDbHome } from "../paths/oridbHome.js";
 import { getHandle } from "../registry/connectionRegistry.js";
 import { getConnectionOr404 } from "./connections.js";
 import { HttpError } from "../http/HttpError.js";
-import { dialectOf, listTables, sqliteListTables } from "../services/schemaService.js";
+import {
+  dialectOf,
+  listTables,
+  listTablesSnowflake,
+  sqliteListTables,
+} from "../services/schemaService.js";
 
 type HistoryEntry = {
   name: string;
@@ -173,7 +178,15 @@ migrationsRouter.post("/:connId/diff", async (req, res, next) => {
     const current =
       d === "sqlite"
         ? (await sqliteListTables(h.sql)).map((t) => t.name)
-        : (await listTables(h.sql, d, schema)).map((t) => t.name);
+        : d === "snowflake"
+          ? (
+              await listTablesSnowflake(
+                h.sql,
+                cfg.database ?? "SNOWFLAKE",
+                schema,
+              )
+            ).map((t) => t.name)
+          : (await listTables(h.sql, d, schema)).map((t) => t.name);
     const added = current.filter((t) => !snapshot.includes(t));
     const removed = snapshot.filter((t) => !current.includes(t));
     res.json({ diff: { added, removed, tables: [...added, ...removed] } });

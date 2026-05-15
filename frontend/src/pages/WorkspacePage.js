@@ -2,17 +2,18 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 /**
  * Main workspace — query editor, results, charts, ER, migrations, import/export, monitoring, diff, multi-DB.
  */
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis, } from "recharts";
 import { useSessionStore } from "../stores/sessionStore";
 import { useUiStore } from "../stores/uiStore";
-import { api } from "../api/client";
+import { api, apiUrl } from "../api/client";
 import { QueryEditor, formatSql } from "../components/QueryEditor";
 import { VirtualDataGrid } from "../components/VirtualDataGrid";
 import { VisualQueryBuilder } from "../components/VisualQueryBuilder";
 import { ErDiagramView } from "../components/ErDiagramView";
 import { diffResults } from "../lib/queryDiff";
+import { ExportDataMenu } from "../components/ExportDataMenu";
 import { SchemaExplorer } from "../components/SchemaExplorer";
 import { WorkspaceLayout } from "../components/WorkspaceLayout";
 import { InspectorPanel } from "../components/InspectorPanel";
@@ -44,11 +45,13 @@ function EditorTabBar() {
                         }, children: "\u00D7" }))] }, t.id))), _jsx("button", { type: "button", title: "New query tab", className: "text-text-muted hover:text-primary px-2 text-xs", onClick: () => addTab({ title: `Query ${tabs.length + 1}`, kind: "query" }), children: "+" })] }));
 }
 function WorkspaceCenter({ connId }) {
+    const location = useLocation();
     const activeTabId = useWorkspaceStore((s) => s.activeTabId);
     const tabs = useWorkspaceStore((s) => s.tabs);
     const active = tabs.find((t) => t.id === activeTabId);
     const schema = useSessionStore((s) => s.selectedSchema);
-    if (active?.kind === "table" && active.table) {
+    const onQueryRoute = location.pathname === "/workspace" || location.pathname === "/workspace/";
+    if (active?.kind === "table" && active.table && onQueryRoute) {
         return (_jsx(TableViewer, { connId: connId, table: active.table, schema: active.schema ?? schema }));
     }
     return _jsx(Outlet, {});
@@ -57,23 +60,61 @@ export function WorkspaceShell() {
     const id = useSessionStore((s) => s.activeConnectionId);
     const connected = useSessionStore((s) => s.connected);
     const setActive = useSessionStore((s) => s.setActive);
-    const connectionName = useSessionStore((s) => s.connectionName);
-    const engine = useSessionStore((s) => s.engine);
+    const pushToast = useUiStore((s) => s.pushToast);
     useEffect(() => {
-        if (!id || connected)
+        if (!id)
             return;
-        void api("/connections")
-            .then(async (r) => {
-            const c = r.connections.find((x) => x.id === id);
-            if (!c)
-                return;
-            await api(`/connections/${id}/connect`, { method: "POST" });
-            setActive(id, true, { name: c.name, engine: c.engine });
-        })
-            .catch(() => {
-            /* user can reconnect from Connections */
-        });
-    }, [id, connected, setActive]);
+        let cancelled = false;
+        void (async () => {
+            try {
+                const status = await api(`/connections/${id}/status`);
+                if (cancelled)
+                    return;
+                const list = await api("/connections");
+                const c = list.connections.find((x) => x.id === id);
+                if (!c) {
+                    setActive(null, false);
+                    pushToast({
+                        type: "error",
+                        message: "Saved connection no longer exists.",
+                    });
+                    return;
+                }
+                if (status.connected) {
+                    if (!connected) {
+                        setActive(id, true, {
+                            name: c.name,
+                            engine: c.engine,
+                            defaultSchema: c.defaultSchema,
+                        });
+                    }
+                    return;
+                }
+                if (connected) {
+                    setActive(id, false, { name: c.name, engine: c.engine });
+                }
+                await api(`/connections/${id}/connect`, { method: "POST" });
+                if (cancelled)
+                    return;
+                setActive(id, true, {
+                    name: c.name,
+                    engine: c.engine,
+                    defaultSchema: c.defaultSchema,
+                });
+            }
+            catch (e) {
+                if (!cancelled) {
+                    pushToast({
+                        type: "error",
+                        message: e instanceof Error ? e.message : "Reconnect failed",
+                    });
+                }
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [id, setActive, pushToast]); // eslint-disable-line react-hooks/exhaustive-deps -- sync once per connection id
     if (!id) {
         return (_jsxs("div", { className: "text-text-secondary p-8 text-center text-sm", children: ["No active connection.", " ", _jsx(NavLink, { className: "text-primary underline", to: "/connections", children: "Open connections" })] }));
     }
@@ -87,19 +128,60 @@ export function WorkspaceShell() {
 function useConnId() {
     return useSessionStore((s) => s.activeConnectionId);
 }
+function sqlDialect(engine) {
+    if (engine === "mysql" || engine === "mariadb" || engine === "planetscale") {
+        return "mysql";
+    }
+    if (engine === "sqlite")
+        return "sqlite";
+    return "postgresql";
+}
 export function QueryTab() {
     const connId = useConnId();
+    const connected = useSessionStore((s) => s.connected);
+    const engine = useSessionStore((s) => s.engine);
     const pushToast = useUiStore((s) => s.pushToast);
-    const [sql, setSql] = useState("SELECT 1 AS one;");
-    const [results, setResults] = useState([]);
-    const [tab, setTab] = useState("grid");
+    const tabs = useWorkspaceStore((s) => s.tabs);
+    const activeTabId = useWorkspaceStore((s) => s.activeTabId);
+    const updateTab = useWorkspaceStore((s) => s.updateTab);
+    const setActiveTab = useWorkspaceStore((s) => s.setActiveTab);
+    const queryTab = tabs.find((t) => t.id === activeTabId && t.kind === "query") ??
+        tabs.find((t) => t.kind === "query");
+    useEffect(() => {
+        if (queryTab && activeTabId !== queryTab.id) {
+            setActiveTab(queryTab.id);
+        }
+    }, [activeTabId, queryTab, setActiveTab]);
+    const sql = queryTab?.sql ?? "SELECT 1 AS one;";
+    const setSql = (next) => {
+        if (queryTab)
+            updateTab(queryTab.id, { sql: next });
+    };
+    const results = queryTab?.lastResults ?? [];
+    const messages = queryTab?.lastMessages ?? [];
+    const [view, setView] = useState("grid");
+    const [running, setRunning] = useState(false);
     const run = useCallback(async (q) => {
+        if (!connected) {
+            pushToast({
+                type: "error",
+                message: "Not connected — open Connections and connect first.",
+            });
+            return;
+        }
+        const tabId = queryTab?.id;
+        if (!tabId)
+            return;
+        setRunning(true);
         try {
             const r = await api("/query", {
                 method: "POST",
                 body: JSON.stringify({ connectionId: connId, sql: q }),
             });
-            setResults(r.results);
+            updateTab(tabId, {
+                lastResults: r.results,
+                lastMessages: r.messages ?? [],
+            });
             const last = r.results[r.results.length - 1];
             useWorkspaceStore.getState().setQueryMetrics({
                 durationMs: r.durationMs,
@@ -114,12 +196,20 @@ export function QueryTab() {
             pushToast({ type: "success", message: "Query finished" });
         }
         catch (e) {
+            updateTab(tabId, { lastResults: [], lastMessages: [] });
+            useWorkspaceStore.getState().setInspector({
+                type: "query",
+                status: "error",
+            });
             pushToast({ type: "error", message: e.message });
         }
-    }, [connId, pushToast]);
+        finally {
+            setRunning(false);
+        }
+    }, [connId, connected, pushToast, queryTab?.id, updateTab]);
     const onFormat = async () => {
         try {
-            const next = await formatSql(sql, "postgresql");
+            const next = await formatSql(sql, sqlDialect(engine));
             setSql(next);
         }
         catch (e) {
@@ -143,17 +233,18 @@ export function QueryTab() {
             y: Number(r[y.c.name]),
         }));
     }, [last]);
-    return (_jsxs("div", { className: "flex min-h-0 min-w-0 flex-1 flex-col gap-2 p-2", children: [_jsxs("div", { className: "border-border bg-surface-elevated flex flex-wrap items-center gap-2 rounded border px-2 py-1", children: [_jsx("button", { type: "button", className: "bg-primary rounded px-3 py-1 text-xs text-white", onClick: () => void run(sql), children: "Run" }), _jsx("button", { type: "button", className: "border-border rounded border px-2 py-1 text-xs", onClick: () => void onFormat(), children: "Format" }), _jsx("div", { className: "ml-auto flex gap-1 text-[11px]", children: ["grid", "chart", "messages"].map((t) => (_jsx("button", { type: "button", className: `rounded px-2 py-0.5 capitalize ${tab === t ? "bg-selection" : ""}`, onClick: () => setTab(t), children: t }, t))) })] }), _jsx("div", { className: "border-border bg-surface-elevated min-h-[200px] flex-1 rounded border", children: _jsx(QueryEditor, { value: sql, onChange: setSql, onRun: (q) => void run(q) }) }), tab === "grid" && (_jsx("div", { className: "border-border bg-surface-elevated h-64 rounded border p-1", children: _jsx(VirtualDataGrid, { columns: cols, rows: rows }) })), tab === "chart" && (_jsx("div", { className: "border-border bg-surface-elevated h-64 rounded border p-2", children: chartData.length ? (_jsx(ResponsiveContainer, { width: "100%", height: "100%", children: _jsxs(BarChart, { data: chartData, children: [_jsx(CartesianGrid, { strokeDasharray: "3 3" }), _jsx(XAxis, { dataKey: "x" }), _jsx(YAxis, { dataKey: "y" }), _jsx(Tooltip, {}), _jsx(Bar, { dataKey: "y", fill: "var(--primary)" })] }) })) : (_jsx("div", { className: "text-text-muted p-4 text-center text-sm", children: "Run a query with two numeric columns for a bar chart." })) })), tab === "messages" && (_jsx("div", { className: "text-text-muted border-border bg-surface-elevated rounded border p-2 text-xs", children: "Server notices appear here." }))] }));
+    return (_jsxs("div", { className: "flex min-h-0 min-w-0 flex-1 flex-col gap-2 p-2", children: [_jsxs("div", { className: "border-border bg-surface-elevated flex flex-wrap items-center gap-2 rounded border px-2 py-1", children: [_jsx("button", { type: "button", className: "oridb-btn oridb-btn-primary h-7 px-3 text-xs", disabled: running, onClick: () => void run(sql), children: running ? "Running…" : "Run" }), _jsx("button", { type: "button", className: "border-border rounded border px-2 py-1 text-xs", onClick: () => void onFormat(), children: "Format" }), _jsx(ExportDataMenu, { columns: cols.map((c) => ({ name: c.id })), rows: rows, basename: "query-results", disabled: running }), _jsx("div", { className: "ml-auto flex gap-1 text-[11px]", children: ["grid", "chart", "messages"].map((t) => (_jsx("button", { type: "button", className: `rounded px-2 py-0.5 capitalize ${view === t ? "bg-selection" : ""}`, onClick: () => setView(t), children: t }, t))) })] }), _jsx("div", { className: "border-border bg-surface-elevated min-h-[200px] flex-1 rounded border", children: _jsx(QueryEditor, { value: sql, onChange: setSql, onRun: (q) => void run(q), dialect: sqlDialect(engine) }) }), view === "grid" && (_jsx("div", { className: "border-border bg-surface-elevated h-64 rounded border p-1", children: cols.length === 0 ? (_jsx("p", { className: "text-text-muted flex h-full items-center justify-center p-4 text-sm", children: "Run a query to see results" })) : (_jsx(VirtualDataGrid, { columns: cols, rows: rows })) })), view === "chart" && (_jsx("div", { className: "border-border bg-surface-elevated h-64 rounded border p-2", children: chartData.length ? (_jsx(ResponsiveContainer, { width: "100%", height: "100%", children: _jsxs(BarChart, { data: chartData, children: [_jsx(CartesianGrid, { strokeDasharray: "3 3" }), _jsx(XAxis, { dataKey: "x" }), _jsx(YAxis, { dataKey: "y" }), _jsx(Tooltip, {}), _jsx(Bar, { dataKey: "y", fill: "var(--primary)" })] }) })) : (_jsx("div", { className: "text-text-muted p-4 text-center text-sm", children: "Run a query with two numeric columns for a bar chart." })) })), view === "messages" && (_jsx("div", { className: "text-text-muted border-border bg-surface-elevated oridb-scrollbar max-h-48 overflow-y-auto rounded border p-2 text-xs", children: messages.length === 0 ? (_jsx("p", { children: "No messages for the last query." })) : (messages.map((m, i) => _jsx("p", { children: m }, i))) }))] }));
 }
 export function VisualTab() {
     const connId = useConnId();
+    const schema = useSessionStore((s) => s.selectedSchema);
     const pushToast = useUiStore((s) => s.pushToast);
     const [tables, setTables] = useState([]);
     useEffect(() => {
-        void api(`/schema/${connId}/tables?schema=public`)
+        void api(`/schema/${connId}/tables?schema=${encodeURIComponent(schema)}`)
             .then((r) => setTables(r.tables.map((t) => t.name)))
             .catch(() => setTables([]));
-    }, [connId]);
+    }, [connId, schema]);
     const run = async (sql) => {
         try {
             await api("/query", {
@@ -170,12 +261,13 @@ export function VisualTab() {
 }
 export function ErTab() {
     const connId = useConnId();
+    const schema = useSessionStore((s) => s.selectedSchema);
     const [data, setData] = useState({ nodes: [], edges: [] });
     useEffect(() => {
-        void api(`/schema/${connId}/er-diagram?schema=public`)
+        void api(`/schema/${connId}/er-diagram?schema=${encodeURIComponent(schema)}`)
             .then(setData)
             .catch(() => setData({ nodes: [], edges: [] }));
-    }, [connId]);
+    }, [connId, schema]);
     return _jsx(ErDiagramView, { data: data });
 }
 export function MigrationsTab() {
@@ -204,15 +296,17 @@ export function MigrationsTab() {
 }
 export function ImportExportTab() {
     const connId = useConnId();
+    const schema = useSessionStore((s) => s.selectedSchema);
     const pushToast = useUiStore((s) => s.pushToast);
     const [table, setTable] = useState("");
     const [tables, setTables] = useState([]);
     const [exportJobId, setExportJobId] = useState(null);
+    const [exportFormat, setExportFormat] = useState("csv");
     useEffect(() => {
-        void api(`/schema/${connId}/tables`)
+        void api(`/schema/${connId}/tables?schema=${encodeURIComponent(schema)}`)
             .then((r) => setTables(r.tables.map((t) => t.name)))
             .catch(() => setTables([]));
-    }, [connId]);
+    }, [connId, schema]);
     const importCsv = async (file) => {
         if (!table) {
             pushToast({ type: "error", message: "Select a target table first" });
@@ -222,6 +316,7 @@ export function ImportExportTab() {
         fd.append("file", file);
         fd.append("connectionId", connId);
         fd.append("table", table);
+        fd.append("schema", schema);
         fd.append("hasHeader", "true");
         try {
             const r = await api("/import", { method: "POST", body: fd });
@@ -231,7 +326,7 @@ export function ImportExportTab() {
             pushToast({ type: "error", message: e.message });
         }
     };
-    const exportZip = async () => {
+    const exportTable = async () => {
         if (!table) {
             pushToast({ type: "error", message: "Select a table first" });
             return;
@@ -239,10 +334,15 @@ export function ImportExportTab() {
         try {
             const r = await api("/export", {
                 method: "POST",
-                body: JSON.stringify({ connectionId: connId, tables: [table] }),
+                body: JSON.stringify({
+                    connectionId: connId,
+                    tables: [table],
+                    schema,
+                    format: exportFormat,
+                }),
             });
             setExportJobId(r.jobId);
-            pushToast({ type: "info", message: "Export running…" });
+            pushToast({ type: "info", message: "Export job started…" });
         }
         catch (e) {
             pushToast({ type: "error", message: e.message });
@@ -252,17 +352,34 @@ export function ImportExportTab() {
                                     const f = e.target.files?.[0];
                                     if (f)
                                         void importCsv(f);
-                                } })] }), _jsx("button", { type: "button", className: "border-border rounded border px-3 py-1", onClick: () => void exportZip(), children: "Export ZIP" }), exportJobId && (_jsx("a", { className: "text-primary underline", href: `/api/export/${exportJobId}/download`, children: "Download" }))] })] }));
+                                } })] }), _jsxs("select", { className: "border-border bg-bg rounded border px-2 py-1 text-xs", value: exportFormat, onChange: (e) => setExportFormat(e.target.value), children: [_jsx("option", { value: "csv", children: "ZIP of CSV files" }), _jsx("option", { value: "jsonl", children: "ZIP of JSONL" })] }), _jsx("button", { type: "button", className: "border-border rounded border px-3 py-1", onClick: () => void exportTable(), children: "Export table (background)" }), table && (_jsx("a", { className: "border-border text-primary rounded border px-3 py-1 underline", href: apiUrl(`/rows/${connId}/${encodeURIComponent(table)}?schema=${encodeURIComponent(schema)}&format=csv&limit=100000`), download: `${table}.csv`, children: "Download CSV now" })), exportJobId && (_jsx("a", { className: "text-primary underline", href: apiUrl(`/export/${exportJobId}/download`), children: "Download" }))] })] }));
 }
 export function MonitorTab() {
     const connId = useConnId();
+    const engine = useSessionStore((s) => s.engine);
     const [overview, setOverview] = useState(null);
+    const [error, setError] = useState(null);
     useEffect(() => {
+        setError(null);
         void api(`/monitor/${connId}/overview`)
-            .then(setOverview)
-            .catch(() => setOverview(null));
+            .then((r) => {
+            setOverview(r);
+            setError(null);
+        })
+            .catch((e) => {
+            setOverview(null);
+            setError(e instanceof Error ? e.message : String(e));
+        });
     }, [connId]);
-    return (_jsx("pre", { className: "text-text-primary oridb-scrollbar m-4 max-h-[400px] overflow-auto rounded bg-code-bg p-3 text-xs", children: JSON.stringify(overview, null, 2) }));
+    if (error) {
+        return (_jsx("p", { className: "text-text-muted m-4 text-sm", children: engine === "postgresql" ||
+                engine === "neon" ||
+                engine === "supabase" ||
+                engine === "cockroachdb"
+                ? error
+                : "Monitoring overview is limited on this engine. Query history stats may still appear when supported." }));
+    }
+    return (_jsx("pre", { className: "text-text-primary oridb-scrollbar m-4 max-h-[400px] overflow-auto rounded bg-code-bg p-3 text-xs", children: overview == null ? "Loading…" : JSON.stringify(overview, null, 2) }));
 }
 export function DiffTab() {
     const [a, setA] = useState("SELECT 1 AS id, 'x' AS v");

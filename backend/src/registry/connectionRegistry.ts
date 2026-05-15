@@ -10,6 +10,8 @@ import type { MongoDriver } from "../drivers/mongo.js";
 import type { RedisDriver } from "../drivers/redis.js";
 import { createMongoDriver } from "../drivers/mongo.js";
 import { createRedisDriver } from "../drivers/redis.js";
+import { createSnowflakeDriver } from "../drivers/snowflake.js";
+import { withConnectionLock } from "../util/connectionLock.js";
 
 export type ActiveHandle = {
   config: ConnectionConfig;
@@ -33,46 +35,60 @@ function createSql(cfg: ConnectionConfig): SqlDriver {
       return createMysqlDriver(cfg);
     case "sqlite":
       return createSqliteDriver(cfg);
+    case "snowflake":
+      return createSnowflakeDriver(cfg);
+    case "clickhouse":
+      throw new Error(
+        "ClickHouse: paste the URL to save the profile; query support requires the ClickHouse driver (coming soon).",
+      );
+    case "sqlserver":
+      throw new Error(
+        "SQL Server: profile can be saved from a URL; install mssql driver support is planned.",
+      );
     default:
       throw new Error(`Engine ${cfg.engine} is not SQL-backed in this build`);
   }
 }
 
 export async function connectHandle(cfg: ConnectionConfig): Promise<ActiveHandle> {
-  const existing = active.get(cfg.id);
-  if (existing) await disconnectHandle(cfg.id);
+  return withConnectionLock(cfg.id, async () => {
+    const existing = active.get(cfg.id);
+    if (existing) await disconnectHandleUnlocked(cfg.id);
 
-  if (
-    cfg.engine === "mongodb"
-  ) {
-    const mongo = createMongoDriver(cfg);
-    await mongo.connect();
-    const h: ActiveHandle = { config: cfg, mongo };
+    if (cfg.engine === "mongodb") {
+      const mongo = createMongoDriver(cfg);
+      await mongo.connect();
+      const h: ActiveHandle = { config: cfg, mongo };
+      active.set(cfg.id, h);
+      return h;
+    }
+    if (cfg.engine === "redis") {
+      const redis = createRedisDriver(cfg);
+      await redis.connect();
+      const h: ActiveHandle = { config: cfg, redis };
+      active.set(cfg.id, h);
+      return h;
+    }
+
+    const sql = createSql(cfg);
+    await sql.connect();
+    const h: ActiveHandle = { config: cfg, sql };
     active.set(cfg.id, h);
     return h;
-  }
-  if (cfg.engine === "redis") {
-    const redis = createRedisDriver(cfg);
-    await redis.connect();
-    const h: ActiveHandle = { config: cfg, redis };
-    active.set(cfg.id, h);
-    return h;
-  }
-
-  const sql = createSql(cfg);
-  await sql.connect();
-  const h: ActiveHandle = { config: cfg, sql };
-  active.set(cfg.id, h);
-  return h;
+  });
 }
 
-export async function disconnectHandle(id: string): Promise<void> {
+async function disconnectHandleUnlocked(id: string): Promise<void> {
   const h = active.get(id);
   if (!h) return;
+  active.delete(id);
   await h.sql?.disconnect();
   await h.mongo?.disconnect();
   await h.redis?.disconnect();
-  active.delete(id);
+}
+
+export async function disconnectHandle(id: string): Promise<void> {
+  return withConnectionLock(id, () => disconnectHandleUnlocked(id));
 }
 
 export function getHandle(id: string): ActiveHandle | undefined {

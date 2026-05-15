@@ -155,4 +155,25 @@ describe.runIf(sqliteAvailable)("OriDB extended (SQLite)", () => {
     const labels = res.body.suggestions.map((s: { label: string }) => s.label);
     expect(labels.some((l: string) => l.toLowerCase().includes("p"))).toBe(true);
   });
+
+  it("PUT and DELETE /api/connections/:id", async () => {
+    const updated = await request(app)
+      .put(`/api/connections/${connId}`)
+      .send({ name: "Ext SQLite Renamed", readOnly: false });
+    expect(updated.status).toBe(200);
+    expect(updated.body.connection.name).toBe("Ext SQLite Renamed");
+
+    const list = await request(app).get("/api/connections");
+    expect(list.body.connections.some((c: { id: string }) => c.id === connId)).toBe(
+      true,
+    );
+
+    const del = await request(app).delete(`/api/connections/${connId}`);
+    expect(del.status).toBe(204);
+
+    const after = await request(app).get("/api/connections");
+    expect(after.body.connections.some((c: { id: string }) => c.id === connId)).toBe(
+      false,
+    );
+  });
 });

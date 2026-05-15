@@ -36,7 +36,7 @@ export function WorkspaceLayout({
           {!hideSide && (
             <>
               <Panel defaultSize={18} minSize={12} maxSize={35}>
-                <div className="border-border bg-surface-elevated flex h-full flex-col border-r">
+                <div className="bg-surface-elevated flex h-full flex-col shadow-sm">
                   {sidebar}
                 </div>
               </Panel>
@@ -50,7 +50,7 @@ export function WorkspaceLayout({
             <>
               <PanelResizeHandle className="bg-border hover:bg-primary w-1 transition-colors duration-150" />
               <Panel defaultSize={22} minSize={15} maxSize={40}>
-                <div className="border-border bg-surface-elevated flex h-full flex-col border-l">
+                <div className="bg-surface-elevated flex h-full flex-col shadow-sm">
                   {inspector}
                 </div>
               </Panel>

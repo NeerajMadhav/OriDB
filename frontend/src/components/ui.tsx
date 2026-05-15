@@ -39,13 +39,7 @@ export function Card({
         : padding === "lg"
           ? "p-6"
           : "p-4";
-  return (
-    <motion
-      className={`oridb-card ${pad} ${className}`}
-    >
-      {children}
-    </motion>
-  );
+  return <div className={`oridb-card ${pad} ${className}`}>{children}</div>;
 }
 
 export function PanelHeader({
@@ -58,9 +52,7 @@ export function PanelHeader({
   action?: ReactNode;
 }) {
   return (
-    <motion
-      className="border-border flex items-start justify-between gap-2 border-b px-3 py-2.5"
-    >
+    <div className="border-border flex items-start justify-between gap-2 border-b px-3 py-2.5">
       <div>
         <h2 className="text-text-primary text-sm font-semibold tracking-tight">{title}</h2>
         {subtitle && (
@@ -68,7 +60,7 @@ export function PanelHeader({
         )}
       </div>
       {action}
-    </motion>
+    </div>
   );
 }
 
@@ -82,14 +74,16 @@ export function Btn({
   variant?: "primary" | "secondary" | "ghost" | "danger";
   size?: "sm" | "md";
 }) {
-  const base = "oridb-btn inline-flex items-center justify-center gap-1.5 font-medium transition-all duration-150 disabled:opacity-50 disabled:pointer-events-none";
+  const base =
+    "oridb-btn inline-flex items-center justify-center gap-1.5 font-medium transition-all duration-150 disabled:opacity-50 disabled:pointer-events-none";
   const variants = {
     primary: "oridb-btn-primary",
     secondary: "oridb-btn-secondary",
     ghost: "oridb-btn-ghost",
     danger: "oridb-btn-danger",
   };
-  const sizes = size === "sm" ? "h-7 px-2.5 text-xs rounded-md" : "h-9 px-3.5 text-sm rounded-lg";
+  const sizes =
+    size === "sm" ? "h-7 px-2.5 text-xs rounded-md" : "h-9 px-3.5 text-sm rounded-lg";
   return (
     <button
       type="button"
@@ -129,34 +123,21 @@ export function EmptyState({
   action?: ReactNode;
 }) {
   return (
-    <motion
-      className="flex flex-col items-center justify-center px-6 py-12 text-center"
-    >
+    <div className="flex flex-col items-center justify-center px-6 py-12 text-center">
       {icon && (
-        <motion className="text-text-muted/40 mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-selection/40">
+        <div className="text-text-muted/40 mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-selection/40">
           {icon}
-        </motion>
+        </div>
       )}
       <p className="text-text-primary text-sm font-medium">{title}</p>
       {description && (
         <p className="text-text-muted mt-1.5 max-w-xs text-xs leading-relaxed">{description}</p>
       )}
-      {action && <motion className="mt-4">{action}</motion>}
-    </motion>
+      {action && <div className="mt-4">{action}</div>}
+    </div>
   );
 }
 
 export function Kbd({ children }: { children: ReactNode }) {
   return <kbd className="oridb-kbd">{children}</kbd>;
-}
-
-/** Avoid typo: use div wrapper named motion for fragment-like layout blocks */
-function motion({
-  className = "",
-  children,
-}: {
-  className?: string;
-  children: ReactNode;
-}) {
-  return <motion className={className}>{children}</motion>;
 }

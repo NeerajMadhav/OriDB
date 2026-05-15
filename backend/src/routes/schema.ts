@@ -20,7 +20,9 @@ import {
   listIndexes,
   listProcedures,
   listSchemas,
+  listSchemasSnowflake,
   listTables,
+  listTablesSnowflake,
   listTriggers,
   listViews,
   sqliteErDiagram,
@@ -55,6 +57,12 @@ schemaRouter.get("/:connId/databases", async (req, res, next) => {
       res.json({ databases: ["main"] });
       return;
     }
+    if (d === "snowflake") {
+      res.json({
+        databases: cfg.database ? [cfg.database] : ["SNOWFLAKE"],
+      });
+      return;
+    }
     const databases = await listDatabases(sql, d);
     res.json({ databases });
   } catch (e) {
@@ -76,6 +84,11 @@ schemaRouter.get("/:connId", async (req, res, next) => {
       res.json({ engine: cfg.engine, schemas: ["main"], tables });
       return;
     }
+    if (d === "snowflake") {
+      const schemas = await listSchemasSnowflake(sql, cfg.database ?? "SNOWFLAKE");
+      res.json({ engine: cfg.engine, schemas });
+      return;
+    }
     const schemas = await listSchemas(sql, d);
     res.json({ engine: cfg.engine, schemas });
   } catch (e) {
@@ -95,6 +108,15 @@ schemaRouter.get("/:connId/tables", async (req, res, next) => {
     const d = dialectOf(cfg);
     if (d === "sqlite") {
       const tables = await sqliteListTables(sql);
+      res.json({ tables });
+      return;
+    }
+    if (d === "snowflake") {
+      const tables = await listTablesSnowflake(
+        sql,
+        cfg.database ?? "SNOWFLAKE",
+        schema,
+      );
       res.json({ tables });
       return;
     }

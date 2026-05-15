@@ -4,6 +4,11 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
+export type QueryResultSet = {
+  columns: { name: string }[];
+  rows: Record<string, unknown>[];
+};
+
 export type EditorTab = {
   id: string;
   title: string;
@@ -12,6 +17,8 @@ export type EditorTab = {
   table?: string;
   schema?: string;
   unsaved?: boolean;
+  lastResults?: QueryResultSet[];
+  lastMessages?: string[];
 };
 
 export type InspectorContext =

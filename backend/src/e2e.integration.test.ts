@@ -133,6 +133,21 @@ describe.runIf(sqliteAvailable)("OriDB E2E (SQLite)", () => {
     expect(res.body.history.length).toBeGreaterThan(0);
   });
 
+  it("POST /api/connections/sqlite/open-path opens existing file", async () => {
+    const res = await request(app)
+      .post("/api/connections/sqlite/open-path")
+      .send({ path: tmpDb, name: "E2E File", connect: true });
+    expect([200, 201]).toContain(res.status);
+    expect(res.body.connection.engine).toBe("sqlite");
+    expect(res.body.connected).toBe(true);
+    expect(res.body.resolvedPath).toBe(path.normalize(tmpDb));
+    const q = await request(app)
+      .post("/api/query")
+      .send({ connectionId: res.body.connection.id, sql: "SELECT COUNT(*) AS c FROM items" });
+    expect(q.status).toBe(200);
+    expect(Number(q.body.results[0].rows[0].c)).toBeGreaterThanOrEqual(1);
+  });
+
   it("POST /api/connections/:id/disconnect", async () => {
     const res = await request(app).post(`/api/connections/${connId}/disconnect`);
     expect(res.status).toBe(200);

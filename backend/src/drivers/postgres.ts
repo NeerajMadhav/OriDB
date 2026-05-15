@@ -4,7 +4,8 @@
 import pg from "pg";
 import type { ConnectionConfig } from "../types/connection.js";
 import type { SqlDriver } from "./sqlTypes.js";
-import { defaultPortForEngine } from "../types/connection.js";
+import { buildPgPoolConfig } from "../util/pgConnection.js";
+import { createSqlPoolSession } from "../util/sqlPoolSession.js";
 
 function mapPgType(oid: number): string | undefined {
   const oids: Record<number, string> = {
@@ -38,31 +39,9 @@ export function createPostgresDriver(cfg: ConnectionConfig): SqlDriver {
 
   let pool: pg.Pool | null = null;
   let activePid: number | null = null;
+  const session = createSqlPoolSession();
 
-  const buildConfig = (): pg.PoolConfig => {
-    const host = cfg.host ?? "127.0.0.1";
-    const port = cfg.port ?? defaultPortForEngine("postgresql");
-    const database = cfg.database ?? "postgres";
-    const user = cfg.username ?? "postgres";
-    const password = cfg.password ?? "";
-    const ssl =
-      cfg.ssl === true ? { rejectUnauthorized: false } : false;
-    const max = cfg.poolMax ?? 10;
-    const min = cfg.poolMin ?? 0;
-    const connectionTimeoutMillis = (cfg.connectionTimeoutSec ?? 10) * 1000;
-    return {
-      host,
-      port,
-      database,
-      user,
-      password,
-      ssl,
-      max,
-      min,
-      connectionTimeoutMillis,
-      idleTimeoutMillis: 30_000,
-    };
-  };
+  const buildConfig = (): pg.PoolConfig => buildPgPoolConfig(cfg);
 
   const ensurePool = (): pg.Pool => {
     if (!pool) pool = new pg.Pool(buildConfig());
@@ -91,10 +70,12 @@ export function createPostgresDriver(cfg: ConnectionConfig): SqlDriver {
     },
 
     async connect() {
+      session.open();
       ensurePool();
     },
 
     async disconnect() {
+      await session.close();
       if (pool) {
         await pool.end();
         pool = null;
@@ -103,54 +84,63 @@ export function createPostgresDriver(cfg: ConnectionConfig): SqlDriver {
     },
 
     async ping() {
-      const p = ensurePool();
-      await p.query("SELECT 1");
+      await session.run(async () => {
+        const p = ensurePool();
+        await p.query("SELECT 1");
+      });
     },
 
     async query(sql, params, options) {
-      if (cfg.readOnly) {
-        const head = sql.trimStart().split(/\s+/)[0]?.toUpperCase() ?? "";
-        const allowed = new Set([
-          "SELECT",
-          "WITH",
-          "SHOW",
-          "EXPLAIN",
-          "TABLE",
-          "VALUES",
-        ]);
-        if (!allowed.has(head)) {
-          throw new Error("Connection is read-only");
+      return session.run(async () => {
+        if (cfg.readOnly) {
+          const head = sql.trimStart().split(/\s+/)[0]?.toUpperCase() ?? "";
+          const allowed = new Set([
+            "SELECT",
+            "WITH",
+            "SHOW",
+            "EXPLAIN",
+            "TABLE",
+            "VALUES",
+          ]);
+          if (!allowed.has(head)) {
+            throw new Error("Connection is read-only");
+          }
         }
-      }
-      const p = ensurePool();
-      const timeoutMs = options?.timeoutMs ?? (cfg.queryTimeoutSec ?? 30) * 1000;
-      const client = await p.connect();
-      try {
-        await client.query(`SET statement_timeout TO ${Math.max(1, timeoutMs)}`);
-        const pidRes = await client.query<{ pid: string }>(
-          "SELECT pg_backend_pid()::text AS pid",
-        );
-        activePid = Number(pidRes.rows[0]?.pid);
-        const res = await client.query({
-          text: sql,
-          values: params as never[] | undefined,
-        });
-        const fields = res.fields ?? [];
-        const columns = fields.map((f: { name: string; dataTypeID: number }) => ({
-          name: f.name,
-          dataType: mapPgType(f.dataTypeID),
-        }));
-        const rows = (res.rows as Record<string, unknown>[]) ?? [];
-        return {
-          columns,
-          rows,
-          rowCount: res.rowCount ?? rows.length,
-          command: res.command ?? "",
-        };
-      } finally {
-        activePid = null;
-        client.release();
-      }
+        const p = ensurePool();
+        const timeoutMs =
+          options?.timeoutMs ?? (cfg.queryTimeoutSec ?? 30) * 1000;
+        const client = await p.connect();
+        try {
+          await client.query(
+            `SET statement_timeout TO ${Math.max(1, timeoutMs)}`,
+          );
+          const pidRes = await client.query<{ pid: string }>(
+            "SELECT pg_backend_pid()::text AS pid",
+          );
+          activePid = Number(pidRes.rows[0]?.pid);
+          const res = await client.query({
+            text: sql,
+            values: params as never[] | undefined,
+          });
+          const fields = res.fields ?? [];
+          const columns = fields.map(
+            (f: { name: string; dataTypeID: number }) => ({
+              name: f.name,
+              dataType: mapPgType(f.dataTypeID),
+            }),
+          );
+          const rows = (res.rows as Record<string, unknown>[]) ?? [];
+          return {
+            columns,
+            rows,
+            rowCount: res.rowCount ?? rows.length,
+            command: res.command ?? "",
+          };
+        } finally {
+          activePid = null;
+          client.release();
+        }
+      });
     },
 
     async cancel() {
@@ -158,12 +148,14 @@ export function createPostgresDriver(cfg: ConnectionConfig): SqlDriver {
       const pid = activePid;
       if (!p || pid == null || !Number.isFinite(pid)) return;
       try {
-        const killer = await p.connect();
-        try {
-          await killer.query("SELECT pg_cancel_backend($1::int)", [pid]);
-        } finally {
-          killer.release();
-        }
+        await session.run(async () => {
+          const killer = await p.connect();
+          try {
+            await killer.query("SELECT pg_cancel_backend($1::int)", [pid]);
+          } finally {
+            killer.release();
+          }
+        });
       } catch {
         /* ignore */
       }

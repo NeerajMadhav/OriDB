@@ -3,19 +3,32 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
  * Toast notifications (top-right).
  */
 import { useEffect } from "react";
-import { X } from "lucide-react";
+import { CheckCircle2, AlertCircle, Info, X } from "lucide-react";
 import { useUiStore } from "../stores/uiStore";
+const icons = {
+    success: CheckCircle2,
+    error: AlertCircle,
+    info: Info,
+};
 export function ToastHost() {
     const toasts = useUiStore((s) => s.toasts);
     const remove = useUiStore((s) => s.removeToast);
     useEffect(() => {
-        const timers = toasts.map((t) => window.setTimeout(() => remove(t.id), 4000));
+        const timers = toasts.map((t) => window.setTimeout(() => remove(t.id), 4500));
         return () => timers.forEach(clearTimeout);
     }, [toasts, remove]);
-    return (_jsx("div", { className: "fixed right-4 top-4 z-[60] flex flex-col gap-2", children: toasts.map((t) => (_jsxs("div", { className: "border-border flex min-w-[240px] max-w-sm items-start gap-2 rounded-lg border px-3 py-2 text-sm shadow " +
-                (t.type === "success"
-                    ? "border-success/40 bg-surface-elevated"
-                    : t.type === "error"
-                        ? "border-error/40 bg-surface-elevated"
-                        : "bg-surface-elevated"), children: [_jsx("span", { className: "text-text-primary flex-1", children: t.message }), _jsx("button", { type: "button", className: "text-text-muted hover:text-text-primary", "aria-label": "Dismiss", onClick: () => remove(t.id), children: _jsx(X, { size: 16 }) })] }, t.id))) }));
+    return (_jsx("div", { className: "pointer-events-none fixed top-16 right-4 z-[60] flex flex-col gap-2", children: toasts.map((t) => {
+            const Icon = icons[t.type] ?? Info;
+            return (_jsxs("div", { className: "oridb-card pointer-events-auto flex min-w-[280px] max-w-sm items-start gap-3 border px-4 py-3 text-sm shadow-lg " +
+                    (t.type === "success"
+                        ? "border-success/30"
+                        : t.type === "error"
+                            ? "border-error/30"
+                            : "border-border"), role: "status", children: [_jsx(Icon, { className: "mt-0.5 h-4 w-4 shrink-0 " +
+                            (t.type === "success"
+                                ? "text-success"
+                                : t.type === "error"
+                                    ? "text-error"
+                                    : "text-text-muted") }), _jsx("span", { className: "text-text-primary flex-1 leading-snug", children: t.message }), _jsx("button", { type: "button", className: "text-text-muted hover:text-text-primary shrink-0 rounded p-0.5", "aria-label": "Dismiss", onClick: () => remove(t.id), children: _jsx(X, { size: 16 }) })] }, t.id));
+        }) }));
 }

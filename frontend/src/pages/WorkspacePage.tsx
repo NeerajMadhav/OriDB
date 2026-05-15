@@ -1,7 +1,8 @@
 /**
  * Main workspace — query editor, results, charts, ER, migrations, import/export, monitoring, diff, multi-DB.
  */
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { Play, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Bar,
@@ -14,12 +15,13 @@ import {
 } from "recharts";
 import { useSessionStore } from "../stores/sessionStore";
 import { useUiStore } from "../stores/uiStore";
-import { api } from "../api/client";
+import { api, apiUrl } from "../api/client";
 import { QueryEditor, formatSql } from "../components/QueryEditor";
 import { VirtualDataGrid } from "../components/VirtualDataGrid";
 import { VisualQueryBuilder } from "../components/VisualQueryBuilder";
 import { ErDiagramView } from "../components/ErDiagramView";
 import { diffResults } from "../lib/queryDiff";
+import { ExportDataMenu } from "../components/ExportDataMenu";
 import { SchemaExplorer } from "../components/SchemaExplorer";
 import { WorkspaceLayout } from "../components/WorkspaceLayout";
 import { InspectorPanel } from "../components/InspectorPanel";
@@ -88,12 +90,15 @@ function EditorTabBar() {
 }
 
 function WorkspaceCenter({ connId }: { connId: string }) {
+  const location = useLocation();
   const activeTabId = useWorkspaceStore((s) => s.activeTabId);
   const tabs = useWorkspaceStore((s) => s.tabs);
   const active = tabs.find((t) => t.id === activeTabId);
   const schema = useSessionStore((s) => s.selectedSchema);
+  const onQueryRoute =
+    location.pathname === "/workspace" || location.pathname === "/workspace/";
 
-  if (active?.kind === "table" && active.table) {
+  if (active?.kind === "table" && active.table && onQueryRoute) {
     return (
       <TableViewer
         connId={connId}
@@ -109,24 +114,70 @@ export function WorkspaceShell() {
   const id = useSessionStore((s) => s.activeConnectionId);
   const connected = useSessionStore((s) => s.connected);
   const setActive = useSessionStore((s) => s.setActive);
-  const connectionName = useSessionStore((s) => s.connectionName);
-  const engine = useSessionStore((s) => s.engine);
+  const pushToast = useUiStore((s) => s.pushToast);
 
   useEffect(() => {
-    if (!id || connected) return;
-    void api<{ connections: { id: string; name: string; engine: string }[] }>(
-      "/connections",
-    )
-      .then(async (r) => {
-        const c = r.connections.find((x) => x.id === id);
-        if (!c) return;
+    if (!id) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const status = await api<{ connected: boolean }>(
+          `/connections/${id}/status`,
+        );
+        if (cancelled) return;
+
+        const list = await api<{
+          connections: {
+            id: string;
+            name: string;
+            engine: string;
+            defaultSchema?: string;
+          }[];
+        }>("/connections");
+        const c = list.connections.find((x) => x.id === id);
+        if (!c) {
+          setActive(null, false);
+          pushToast({
+            type: "error",
+            message: "Saved connection no longer exists.",
+          });
+          return;
+        }
+
+        if (status.connected) {
+          if (!connected) {
+            setActive(id, true, {
+              name: c.name,
+              engine: c.engine,
+              defaultSchema: c.defaultSchema,
+            });
+          }
+          return;
+        }
+
+        if (connected) {
+          setActive(id, false, { name: c.name, engine: c.engine });
+        }
         await api(`/connections/${id}/connect`, { method: "POST" });
-        setActive(id, true, { name: c.name, engine: c.engine });
-      })
-      .catch(() => {
-        /* user can reconnect from Connections */
-      });
-  }, [id, connected, setActive]);
+        if (cancelled) return;
+        setActive(id, true, {
+          name: c.name,
+          engine: c.engine,
+          defaultSchema: c.defaultSchema,
+        });
+      } catch (e: unknown) {
+        if (!cancelled) {
+          pushToast({
+            type: "error",
+            message: e instanceof Error ? e.message : "Reconnect failed",
+          });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [id, setActive, pushToast]); // eslint-disable-line react-hooks/exhaustive-deps -- sync once per connection id
 
   if (!id) {
     return (
@@ -185,17 +236,57 @@ function useConnId(): string {
   return useSessionStore((s) => s.activeConnectionId!);
 }
 
+function sqlDialect(engine: string | null): "postgresql" | "mysql" | "sqlite" {
+  if (engine === "mysql" || engine === "mariadb" || engine === "planetscale") {
+    return "mysql";
+  }
+  if (engine === "sqlite") return "sqlite";
+  return "postgresql";
+}
+
 export function QueryTab() {
   const connId = useConnId();
+  const connected = useSessionStore((s) => s.connected);
+  const engine = useSessionStore((s) => s.engine);
   const pushToast = useUiStore((s) => s.pushToast);
-  const [sql, setSql] = useState("SELECT 1 AS one;");
-  const [results, setResults] = useState<
-    { columns: { name: string }[]; rows: Record<string, unknown>[] }[]
-  >([]);
-  const [tab, setTab] = useState<"grid" | "chart" | "messages">("grid");
+  const tabs = useWorkspaceStore((s) => s.tabs);
+  const activeTabId = useWorkspaceStore((s) => s.activeTabId);
+  const updateTab = useWorkspaceStore((s) => s.updateTab);
+  const setActiveTab = useWorkspaceStore((s) => s.setActiveTab);
+
+  const queryTab =
+    tabs.find((t) => t.id === activeTabId && t.kind === "query") ??
+    tabs.find((t) => t.kind === "query");
+
+  useEffect(() => {
+    if (queryTab && activeTabId !== queryTab.id) {
+      setActiveTab(queryTab.id);
+    }
+  }, [activeTabId, queryTab, setActiveTab]);
+
+  const sql = queryTab?.sql ?? "SELECT 1 AS one;";
+  const setSql = (next: string) => {
+    if (queryTab) updateTab(queryTab.id, { sql: next });
+  };
+
+  const results = queryTab?.lastResults ?? [];
+  const messages = queryTab?.lastMessages ?? [];
+
+  const [view, setView] = useState<"grid" | "chart" | "messages">("grid");
+  const [running, setRunning] = useState(false);
 
   const run = useCallback(
     async (q: string) => {
+      if (!connected) {
+        pushToast({
+          type: "error",
+          message: "Not connected — open Connections and connect first.",
+        });
+        return;
+      }
+      const tabId = queryTab?.id;
+      if (!tabId) return;
+      setRunning(true);
       try {
         const r = await api<{
           durationMs: number;
@@ -204,11 +295,15 @@ export function QueryTab() {
             rows: Record<string, unknown>[];
             rowCount: number;
           }[];
+          messages?: string[];
         }>("/query", {
           method: "POST",
           body: JSON.stringify({ connectionId: connId, sql: q }),
         });
-        setResults(r.results);
+        updateTab(tabId, {
+          lastResults: r.results,
+          lastMessages: r.messages ?? [],
+        });
         const last = r.results[r.results.length - 1];
         useWorkspaceStore.getState().setQueryMetrics({
           durationMs: r.durationMs,
@@ -222,15 +317,22 @@ export function QueryTab() {
         });
         pushToast({ type: "success", message: "Query finished" });
       } catch (e) {
+        updateTab(tabId, { lastResults: [], lastMessages: [] });
+        useWorkspaceStore.getState().setInspector({
+          type: "query",
+          status: "error",
+        });
         pushToast({ type: "error", message: (e as Error).message });
+      } finally {
+        setRunning(false);
       }
     },
-    [connId, pushToast],
+    [connId, connected, pushToast, queryTab?.id, updateTab],
   );
 
   const onFormat = async () => {
     try {
-      const next = await formatSql(sql, "postgresql");
+      const next = await formatSql(sql, sqlDialect(engine));
       setSql(next);
     } catch (e) {
       pushToast({ type: "error", message: (e as Error).message });
@@ -264,10 +366,11 @@ export function QueryTab() {
       <div className="border-border bg-surface-elevated flex flex-wrap items-center gap-2 rounded border px-2 py-1">
         <button
           type="button"
-          className="bg-primary rounded px-3 py-1 text-xs text-white"
+          className="oridb-btn oridb-btn-primary h-7 px-3 text-xs"
+          disabled={running}
           onClick={() => void run(sql)}
         >
-          Run
+          {running ? "Running…" : "Run"}
         </button>
         <button
           type="button"
@@ -276,13 +379,19 @@ export function QueryTab() {
         >
           Format
         </button>
+        <ExportDataMenu
+          columns={cols.map((c) => ({ name: c.id }))}
+          rows={rows}
+          basename="query-results"
+          disabled={running}
+        />
         <div className="ml-auto flex gap-1 text-[11px]">
           {(["grid", "chart", "messages"] as const).map((t) => (
             <button
               key={t}
               type="button"
-              className={`rounded px-2 py-0.5 capitalize ${tab === t ? "bg-selection" : ""}`}
-              onClick={() => setTab(t)}
+              className={`rounded px-2 py-0.5 capitalize ${view === t ? "bg-selection" : ""}`}
+              onClick={() => setView(t)}
             >
               {t}
             </button>
@@ -290,14 +399,25 @@ export function QueryTab() {
         </div>
       </div>
       <div className="border-border bg-surface-elevated min-h-[200px] flex-1 rounded border">
-        <QueryEditor value={sql} onChange={setSql} onRun={(q) => void run(q)} />
+        <QueryEditor
+          value={sql}
+          onChange={setSql}
+          onRun={(q) => void run(q)}
+          dialect={sqlDialect(engine)}
+        />
       </div>
-      {tab === "grid" && (
+      {view === "grid" && (
         <div className="border-border bg-surface-elevated h-64 rounded border p-1">
-          <VirtualDataGrid columns={cols} rows={rows} />
+          {cols.length === 0 ? (
+            <p className="text-text-muted flex h-full items-center justify-center p-4 text-sm">
+              Run a query to see results
+            </p>
+          ) : (
+            <VirtualDataGrid columns={cols} rows={rows} />
+          )}
         </div>
       )}
-      {tab === "chart" && (
+      {view === "chart" && (
         <div className="border-border bg-surface-elevated h-64 rounded border p-2">
           {chartData.length ? (
             <ResponsiveContainer width="100%" height="100%">
@@ -316,9 +436,13 @@ export function QueryTab() {
           )}
         </div>
       )}
-      {tab === "messages" && (
-        <div className="text-text-muted border-border bg-surface-elevated rounded border p-2 text-xs">
-          Server notices appear here.
+      {view === "messages" && (
+        <div className="text-text-muted border-border bg-surface-elevated oridb-scrollbar max-h-48 overflow-y-auto rounded border p-2 text-xs">
+          {messages.length === 0 ? (
+            <p>No messages for the last query.</p>
+          ) : (
+            messages.map((m, i) => <p key={i}>{m}</p>)
+          )}
         </div>
       )}
     </div>
@@ -327,15 +451,16 @@ export function QueryTab() {
 
 export function VisualTab() {
   const connId = useConnId();
+  const schema = useSessionStore((s) => s.selectedSchema);
   const pushToast = useUiStore((s) => s.pushToast);
   const [tables, setTables] = useState<string[]>([]);
   useEffect(() => {
     void api<{ tables: { name: string }[] }>(
-      `/schema/${connId}/tables?schema=public`,
+      `/schema/${connId}/tables?schema=${encodeURIComponent(schema)}`,
     )
       .then((r) => setTables(r.tables.map((t) => t.name)))
       .catch(() => setTables([]));
-  }, [connId]);
+  }, [connId, schema]);
   const run = async (sql: string) => {
     try {
       await api("/query", {
@@ -352,15 +477,18 @@ export function VisualTab() {
 
 export function ErTab() {
   const connId = useConnId();
+  const schema = useSessionStore((s) => s.selectedSchema);
   const [data, setData] = useState<{
     nodes: { id: string; label: string }[];
     edges: { id: string; source: string; target: string; label: string }[];
   }>({ nodes: [], edges: [] });
   useEffect(() => {
-    void api<typeof data>(`/schema/${connId}/er-diagram?schema=public`)
+    void api<typeof data>(
+      `/schema/${connId}/er-diagram?schema=${encodeURIComponent(schema)}`,
+    )
       .then(setData)
       .catch(() => setData({ nodes: [], edges: [] }));
-  }, [connId]);
+  }, [connId, schema]);
   return <ErDiagramView data={data} />;
 }
 
@@ -411,16 +539,20 @@ export function MigrationsTab() {
 
 export function ImportExportTab() {
   const connId = useConnId();
+  const schema = useSessionStore((s) => s.selectedSchema);
   const pushToast = useUiStore((s) => s.pushToast);
   const [table, setTable] = useState("");
   const [tables, setTables] = useState<string[]>([]);
   const [exportJobId, setExportJobId] = useState<string | null>(null);
+  const [exportFormat, setExportFormat] = useState<"csv" | "jsonl">("csv");
 
   useEffect(() => {
-    void api<{ tables: { name: string }[] }>(`/schema/${connId}/tables`)
+    void api<{ tables: { name: string }[] }>(
+      `/schema/${connId}/tables?schema=${encodeURIComponent(schema)}`,
+    )
       .then((r) => setTables(r.tables.map((t) => t.name)))
       .catch(() => setTables([]));
-  }, [connId]);
+  }, [connId, schema]);
 
   const importCsv = async (file: File) => {
     if (!table) {
@@ -431,6 +563,7 @@ export function ImportExportTab() {
     fd.append("file", file);
     fd.append("connectionId", connId);
     fd.append("table", table);
+    fd.append("schema", schema);
     fd.append("hasHeader", "true");
     try {
       const r = await api<{ jobId: string }>("/import", { method: "POST", body: fd });
@@ -440,7 +573,7 @@ export function ImportExportTab() {
     }
   };
 
-  const exportZip = async () => {
+  const exportTable = async () => {
     if (!table) {
       pushToast({ type: "error", message: "Select a table first" });
       return;
@@ -448,10 +581,15 @@ export function ImportExportTab() {
     try {
       const r = await api<{ jobId: string }>("/export", {
         method: "POST",
-        body: JSON.stringify({ connectionId: connId, tables: [table] }),
+        body: JSON.stringify({
+          connectionId: connId,
+          tables: [table],
+          schema,
+          format: exportFormat,
+        }),
       });
       setExportJobId(r.jobId);
-      pushToast({ type: "info", message: "Export running…" });
+      pushToast({ type: "info", message: "Export job started…" });
     } catch (e) {
       pushToast({ type: "error", message: (e as Error).message });
     }
@@ -484,11 +622,37 @@ export function ImportExportTab() {
             }}
           />
         </label>
-        <button type="button" className="border-border rounded border px-3 py-1" onClick={() => void exportZip()}>
-          Export ZIP
+        <select
+          className="border-border bg-bg rounded border px-2 py-1 text-xs"
+          value={exportFormat}
+          onChange={(e) => setExportFormat(e.target.value as "csv" | "jsonl")}
+        >
+          <option value="csv">ZIP of CSV files</option>
+          <option value="jsonl">ZIP of JSONL</option>
+        </select>
+        <button
+          type="button"
+          className="border-border rounded border px-3 py-1"
+          onClick={() => void exportTable()}
+        >
+          Export table (background)
         </button>
+        {table && (
+          <a
+            className="border-border text-primary rounded border px-3 py-1 underline"
+            href={apiUrl(
+              `/rows/${connId}/${encodeURIComponent(table)}?schema=${encodeURIComponent(schema)}&format=csv&limit=100000`,
+            )}
+            download={`${table}.csv`}
+          >
+            Download CSV now
+          </a>
+        )}
         {exportJobId && (
-          <a className="text-primary underline" href={`/api/export/${exportJobId}/download`}>
+          <a
+            className="text-primary underline"
+            href={apiUrl(`/export/${exportJobId}/download`)}
+          >
             Download
           </a>
         )}
@@ -499,15 +663,36 @@ export function ImportExportTab() {
 
 export function MonitorTab() {
   const connId = useConnId();
+  const engine = useSessionStore((s) => s.engine);
   const [overview, setOverview] = useState<unknown>(null);
+  const [error, setError] = useState<string | null>(null);
   useEffect(() => {
+    setError(null);
     void api(`/monitor/${connId}/overview`)
-      .then(setOverview)
-      .catch(() => setOverview(null));
+      .then((r) => {
+        setOverview(r);
+        setError(null);
+      })
+      .catch((e: unknown) => {
+        setOverview(null);
+        setError(e instanceof Error ? e.message : String(e));
+      });
   }, [connId]);
+  if (error) {
+    return (
+      <p className="text-text-muted m-4 text-sm">
+        {engine === "postgresql" ||
+        engine === "neon" ||
+        engine === "supabase" ||
+        engine === "cockroachdb"
+          ? error
+          : "Monitoring overview is limited on this engine. Query history stats may still appear when supported."}
+      </p>
+    );
+  }
   return (
     <pre className="text-text-primary oridb-scrollbar m-4 max-h-[400px] overflow-auto rounded bg-code-bg p-3 text-xs">
-      {JSON.stringify(overview, null, 2)}
+      {overview == null ? "Loading…" : JSON.stringify(overview, null, 2)}
     </pre>
   );
 }

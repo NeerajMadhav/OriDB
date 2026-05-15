@@ -15,7 +15,12 @@ import { getConnectionOr404 } from "./connections.js";
 import { appendHistory, clearHistory, loadHistory } from "../store/queryHistory.js";
 import { appendAudit } from "../store/auditLog.js";
 import { HttpError } from "../http/HttpError.js";
-import { listTables, sqliteListTables, dialectOf } from "../services/schemaService.js";
+import {
+  listTables,
+  listTablesSnowflake,
+  sqliteListTables,
+  dialectOf,
+} from "../services/schemaService.js";
 
 const bodySchema = z.object({
   connectionId: z.string().uuid(),
@@ -35,7 +40,13 @@ queryRouter.post("/", async (req, res, next) => {
     const cfg = getConnectionOr404(body.connectionId);
     if (!cfg) throw new HttpError(404, "Connection not found", "NOT_FOUND");
     const h = getHandle(body.connectionId);
-    if (!h?.sql) throw new HttpError(400, "SQL connection not active", "NO_SQL");
+    if (!h?.sql) {
+      throw new HttpError(
+        400,
+        "SQL connection not active — open Connections and connect again",
+        "NO_SQL",
+      );
+    }
 
     if (cfg.readOnly) {
       const upper = body.sql.trim().toUpperCase();
@@ -96,6 +107,7 @@ queryRouter.post("/", async (req, res, next) => {
       throw e;
     } finally {
       cancelMap.delete(body.connectionId);
+      cancelMap.delete(queryId);
     }
   } catch (e) {
     next(e);
@@ -151,7 +163,13 @@ queryRouter.post("/explain", async (req, res, next) => {
   try {
     const body = bodySchema.parse(req.body);
     const h = getHandle(body.connectionId);
-    if (!h?.sql) throw new HttpError(400, "SQL connection not active", "NO_SQL");
+    if (!h?.sql) {
+      throw new HttpError(
+        400,
+        "SQL connection not active — open Connections and connect again",
+        "NO_SQL",
+      );
+    }
     const explainSql = `EXPLAIN ${body.sql}`;
     const r = await h.sql.query(explainSql, body.params);
     res.json({ plan: r });
@@ -189,7 +207,13 @@ queryRouter.post("/autocomplete", async (req, res, next) => {
         const list =
           d === "sqlite"
             ? await sqliteListTables(h.sql)
-            : await listTables(h.sql, d, schema);
+            : d === "snowflake"
+              ? await listTablesSnowflake(
+                  h.sql,
+                  cfg.database ?? "SNOWFLAKE",
+                  schema,
+                )
+              : await listTables(h.sql, d, schema);
         for (const t of list) {
           if (t.name.toUpperCase().startsWith(prefix.toUpperCase())) {
             tables.push({ kind: "table", label: t.name });
